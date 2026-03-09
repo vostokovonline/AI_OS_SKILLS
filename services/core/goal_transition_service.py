@@ -122,31 +122,28 @@ class GoalTransitionService:
                 allowed, block_reason = await self._validate_completion(
                     uow.session, goal_id, new_state
                 )
-                
+
                 if not allowed:
-                    # TEMPORARY BYPASS for atomic goals (2026-03-07)
-                    # Allow atomic goals to complete without strict evidence check
-                    # TODO: Fix root cause - artifact registration before transition
-                    if getattr(goal, 'is_atomic', False):
-                        logger.warning(f"  ⚠️ COMPLETION VIOLATION BYPASSED for atomic goal: {block_reason}")
-                        logger.info(f"{'='*70}\n")
-                        # Continue with transition instead of raising exception
-                    else:
-                        logger.warning(f"  🚫 COMPLETION VIOLATION: {block_reason}")
-                        logger.info(f"{'='*70}\n")
+                    # 🔴 FIXED 2026-03-09: Removed bypass for atomic goals
+                    # NOW ENFORCED: Atomic goals MUST have artifacts to be marked done
+                    # This prevents "phantom completions" - goals marked done without evidence
+                    logger.warning(f"  🚫 COMPLETION VIOLATION: {block_reason}")
+                    logger.info(f"  📝 Required: Atomic goals need at least one PASSED artifact")
+                    logger.info(f"{'='*70}\n")
 
-                        await self._logger.log_violation(
-                            session=uow.session,
-                            goal_id=str(goal_id),
-                            goal_type=getattr(goal, 'goal_type', 'unknown'),
-                            reason=f"Completion violation: {block_reason}"
-                        )
+                    await self._logger.log_violation(
+                        session=uow.session,
+                        goal_id=str(goal_id),
+                        goal_type=getattr(goal, 'goal_type', 'unknown'),
+                        reason=f"Completion violation: {block_reason}"
+                    )
 
-                        raise CompletionViolation(
-                            f"Cannot transition to '{new_state}': {block_reason}\n"
-                            f"CompletionEngine validation failed.\n"
-                            f"Add evidence (artifacts/children/decision) first."
-                        )
+                    raise CompletionViolation(
+                        f"Cannot transition to '{new_state}': {block_reason}\n"
+                        f"CompletionEngine validation failed.\n"
+                        f"Atomic goals require at least one PASSED artifact.\n"
+                        f"Non-atomic goals require completed children or manual approval."
+                    )
             
             event = self._domain.transition(goal, goal_state, reason)
             
@@ -162,6 +159,16 @@ class GoalTransitionService:
             
             logger.info(f"  ✅ Transition: SUCCESS ({from_state} → {new_state})")
             logger.info(f"{'='*70}\n")
+            
+            # Handle goal dependencies - unblock dependent goals when done
+            if new_state == "done":
+                try:
+                    from goal_dependency_resolver import on_goal_done
+                    unblocked = await on_goal_done(goal_id)
+                    if unblocked:
+                        logger.info(f"  🔓 Unblocked {len(unblocked)} dependent goals")
+                except Exception as dep_err:
+                    logger.warning(f"  ⚠️ Dependency resolution failed: {dep_err}")
             
             return {
                 "result": TransitionResult.SUCCESS.value,

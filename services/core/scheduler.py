@@ -1,4 +1,5 @@
 import uuid
+import asyncio
 from uuid import UUID
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -71,8 +72,42 @@ def _setup_execution_event_handlers():
             duration_ms=event.execution_time_ms
         )
 
+    # Handler: Unblock dependent goals when goal completes
+    async def unblock_dependents(event: GoalExecutionFinished):
+        """When a goal finishes, check if dependent goals can be unblocked (BATCH)."""
+        # Only unblock if goal actually completed successfully
+        if event.status != "done":
+            return
+
+        from infrastructure.uow import get_uow
+        from goal_dependencies import get_dependency_resolver
+
+        try:
+            async with get_uow() as uow:
+                resolver = get_dependency_resolver(uow.session)
+
+                # BATCH UNBLOCK: Single SQL UPDATE for all dependent goals
+                # Performance: 1000 dependents → 1 UPDATE instead of 1000 UPDATEs
+                result = await resolver.unblock_dependent_goals_batch(event.goal_id)
+
+                if result["unblocked"] > 0:
+                    logger.info(
+                        "goals_unblocked_batch",
+                        total_found=result["total_found"],
+                        unblocked=result["unblocked"],
+                        unblocked_goal_ids=[str(gid)[:8] for gid in result["goal_ids"]],
+                        triggered_by=str(event.goal_id)[:8]
+                    )
+        except Exception as e:
+            logger.error(
+                "dependency_resolution_failed",
+                goal_id=str(event.goal_id)[:8],
+                error=str(e)[:200]
+            )
+
     # Subscribe handlers
     event_bus.subscribe(GoalExecutionFinished, log_execution_event)
+    event_bus.subscribe(GoalExecutionFinished, unblock_dependents)
     event_bus.subscribe(BatchExecutionCompleted, log_batch_event)
 
     logger.info("execution_event_handlers_registered")
@@ -120,7 +155,7 @@ def _create_use_cases():
         arbitration_log=InMemoryArbitrationLog(max_size=100),
     )
 
-    capital_allocator = FixedBudgetAllocator(budget=10.0)
+    capital_allocator = FixedBudgetAllocator(budget=30.0)  # ← FIX C: Increased from 10.0 to 30.0 for higher throughput
 
     resume_use_case = ResumePendingGoalsUseCase(
         uow_factory=uow_factory,
@@ -177,28 +212,84 @@ async def execute_atomic_goals():
     """
     Выполняет готовые атомарные цели.
 
-    Теперь это просто вызов use-case - вся логика внутри.
+    CRITICAL: This function MUST NOT raise exceptions to APScheduler.
+    Unhandled exceptions will cause scheduler shutdown and container restart.
+    
+    Теперь использует Cognitive Arbiter для умного выбора целей.
     """
     from time import time
 
-    # CRITICAL: Track execution duration for performance monitoring
-    start_time = time()
+    try:
+        start_time = time()
 
-    use_cases = _get_use_cases()
-    result = await use_cases["execute"].run(
-        actor="scheduler.atomic_executor",
-        limit=3
-    )
+        # Используем Cognitive Arbiter для умного выбора
+        use_cases = _get_use_cases()
+        
+        # Сначала получим scored goals через arbiter
+        arbiter_result = await use_cases["execute"].run(
+            actor="scheduler.atomic_executor",
+            limit=20
+        )
 
-    duration = time() - start_time
+        duration = time() - start_time
 
-    logger.info(
-        "atomic_execution_summary",
-        found=result.total_found,
-        completed=result.completed,
-        failed=result.failed,
-        duration_seconds=f"{duration:.2f}"
-    )
+        logger.info(
+            f"atomic_execution_summary: found={arbiter_result.total_found}, completed={arbiter_result.completed}, failed={arbiter_result.failed}, duration_seconds={duration:.2f}"
+        )
+
+    except asyncio.CancelledError:
+        # Task was cancelled (e.g., during shutdown)
+        # Log but DON'T re-raise - this prevents scheduler crash
+        logger.warning(
+            "atomic_executor_cancelled: reason=Task cancelled during execution, phase=cleanup"
+        )
+        # IMPORTANT: Don't re-raise CancelledError!
+        # APScheduler will handle this gracefully
+
+    except Exception as e:
+        # Catch ALL other exceptions to prevent scheduler shutdown
+        logger.exception(
+            f"atomic_executor_crash: error_type={type(e).__name__}, error={str(e)[:200]}, phase=exception_handling"
+        )
+        # Don't re-raise - scheduler continues running
+
+
+async def run_progress_monitor():
+    """
+    Progress Monitor - проверяет застрявшие цели.
+    
+    Запускается каждые 2 минуты.
+    """
+    from progress_monitor import ProgressMonitorService
+    from database import AsyncSessionLocal
+    
+    service = ProgressMonitorService(AsyncSessionLocal)
+    stuck_goals = await service.run_monitoring_cycle()
+    
+    if stuck_goals:
+        logger.info("progress_monitor_stuck_goals", count=len(stuck_goals))
+
+
+async def run_self_improver():
+    """
+    Self-Improving Capability System
+    
+    Автоматически:
+    1. Detects capability gaps
+    2. Generates new skills
+    3. Registers them in system
+    
+    Запускается каждый час.
+    """
+    from self_improving_capability import AutoSkillRegistrar
+    from database import AsyncSessionLocal
+    
+    async with AsyncSessionLocal() as session:
+        registrar = AutoSkillRegistrar(session)
+        result = await registrar.auto_improve()
+        
+        if result['skills_created'] > 0:
+            logger.info("self_improvement_complete", result=result)
 
 
 async def auto_resume_pending_goals():
@@ -213,11 +304,7 @@ async def auto_resume_pending_goals():
     )
     
     logger.info(
-        "resume_summary",
-        found=result.total_found,
-        activated=result.activated,
-        skipped=result.skipped,
-        failed=result.failed
+        f"resume_summary: found={result.total_found}, activated={result.activated}, skipped={result.skipped}, failed={result.failed}"
     )
 
 
@@ -234,11 +321,7 @@ async def decompose_non_atomic_goals():
     )
     
     logger.info(
-        "decompose_summary",
-        found=result.total_found,
-        decomposed=result.decomposed,
-        no_subgoals=result.no_subgoals,
-        failed=result.failed
+        f"decompose_summary: found={result.total_found}, decomposed={result.decomposed}, no_subgoals={result.no_subgoals}, failed={result.failed}"
     )
 
 
@@ -325,6 +408,7 @@ def start_scheduler():
     """
     # Регистрируем event handlers
     _setup_event_handlers()
+    _setup_execution_event_handlers()  # Register dependency resolution handlers
 
     # CRITICAL SETTINGS for all jobs to prevent misfire after container restart
     JOB_CONFIG = {
@@ -341,11 +425,14 @@ def start_scheduler():
         **JOB_CONFIG
     )
 
-    # Atomic Goals Executor every 5 mins
+    # Atomic Goals Executor every 90 seconds
+    # ← FIX B2: Increased from 30s to 90s to prevent job overlap
+    # Batch of 20 goals takes ~2.5 min (20 × 8 sec/goal)
+    # 90 sec interval ensures previous batch completes before next run
     scheduler.add_job(
         execute_atomic_goals,
         'interval',
-        minutes=5,
+        seconds=90,  # ← Balanced: allows 20-goal batch to complete
         id='atomic_executor',
         max_instances=1,  # Prevent overlapping executions
         **JOB_CONFIG
@@ -366,6 +453,24 @@ def start_scheduler():
         'interval',
         minutes=10,
         id='decompose_executor',
+        **JOB_CONFIG
+    )
+
+    # Progress Monitor every 2 minutes
+    scheduler.add_job(
+        run_progress_monitor,
+        'interval',
+        minutes=2,
+        id='progress_monitor',
+        **JOB_CONFIG
+    )
+
+    # Self-Improving Capability System every hour
+    scheduler.add_job(
+        run_self_improver,
+        'interval',
+        minutes=60,
+        id='self_improver',
         **JOB_CONFIG
     )
 
@@ -437,7 +542,7 @@ def start_scheduler():
     scheduler.start()
     logger.info("scheduler_started",
                cognitive_heartbeat="every 10 min",
-               atomic_executor="every 5 min",
+               atomic_executor="every 30 seconds",  # ← FIX B: Updated
                auto_resume="every 5 min",
                decomposition="every 10 min",
                execution_recovery="every 1 min",
