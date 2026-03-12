@@ -142,14 +142,16 @@ class ContextBuilder:
                 pass
         
         # Fallback: simple context building
-        context_parts.append(f"# Target: {goal.target}")
-            
-            if related_nodes:
-                context_parts.append(f"\n# Related Code\n")
-                for node in related_nodes:
-                    context_parts.append(f"## {node.name} ({node.type})")
-                    if node.docstring:
-                        context_parts.append(f"```\n{node.docstring}\n```")
+        if not selector or not goal.target:
+            context_parts.append(f"# Target: {goal.target}")
+            if self.code_graph and goal.target:
+                related = self.code_graph.find_related(goal.target, limit=5)
+                if related:
+                    context_parts.append(f"\n# Related Code\n")
+                    for node in related:
+                        context_parts.append(f"## {node.name} ({node.type})")
+                        if node.docstring:
+                            context_parts.append(f"```\n{node.docstring}\n```")
         
         # Add requirements
         if goal.requirements:
