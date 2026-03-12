@@ -702,14 +702,26 @@ class GoalExecutorV2:
             
             mining_engine = get_mining_engine(get_trace_store())
             
+            # Try task_signature based cache lookup (more precise)
+            required_caps = requirements.get("capabilities", [])
+            required_arts = requirements.get("artifacts", [])
+            
             if goal_type:
+                cached_skill = await mining_engine.get_best_skill(
+                    goal_title=goal_title,
+                    goal_type=goal_type,
+                    capabilities=required_caps,
+                    required_artifacts=required_arts
+                )
+                if cached_skill:
+                    cache_source = f"cognitive_cache_task_sig:{goal_type}"
+            
+            # Fallback to goal_type only
+            if not cached_skill and goal_type:
                 cached_info = await mining_engine.get_best_skill_by_type(goal_type)
                 if cached_info:
                     cached_skill = cached_info.get("skill")
                     cache_source = f"cognitive_cache_goal_type:{goal_type}"
-            
-            if not cached_skill and goal_title:
-                cached_skill = await mining_engine.get_best_skill(goal_title=goal_title, goal_type="")
                 cache_source = "cognitive_cache_keyword"
             
             if cached_skill:
@@ -1641,7 +1653,9 @@ class GoalExecutorV2:
                         "goal_title": goal.title,
                         "goal_type": goal.goal_type or "",
                         "skill_name": skill_id_normalized,
-                        "success": True
+                        "success": True,
+                        "capabilities": requirements.get("capabilities", []),
+                        "required_artifacts": requirements.get("artifacts", [])
                     }
                 )
                 await trace_store.update_trace_status(

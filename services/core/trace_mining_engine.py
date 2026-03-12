@@ -197,32 +197,55 @@ class TraceMiningEngine:
         return strategies
     
     async def build_cognitive_cache(self) -> Dict[str, Dict[str, Any]]:
-        """Построить Cognitive Cache - быстрые решения без LLM по goal_type"""
+        """Построить Cognitive Cache - быстрые решения без LLM по task_signature
+        
+        task_signature = hash(goal_type + capabilities + required_artifacts)
+        """
         traces = await self.trace_store.get_all_traces(limit=500)
         
-        goal_type_skills: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        task_signatures: Dict[str, Dict[str, Dict[str, Any]]] = {}
         
         for trace in traces:
             goal_type = trace.get("goal_type", "")
             if not goal_type:
                 continue
             
+            # Extract task_signature from trace events
+            task_sig = goal_type
+            capabilities = []
+            artifacts = []
+            
+            # Get capabilities and artifacts from trace events
+            for event in trace.get("events", []):
+                if event.get("type") == "SkillSelected":
+                    data = event.get("data", {})
+                    capabilities = data.get("capabilities", [])
+                    artifacts = data.get("required_artifacts", [])
+            
+            # Build task_signature
+            if capabilities:
+                caps_str = "_".join(sorted(capabilities[:3]))  # max 3 capabilities
+                task_sig = f"{goal_type}:{caps_str}"
+            if artifacts:
+                arts_str = "_".join(sorted(artifacts[:2]))  # max 2 artifact types
+                task_sig = f"{task_sig}:{arts_str}"
+            
             skill_name = trace.get("skill_name", "")
             status = trace.get("status", "")
             
-            if goal_type not in goal_type_skills:
-                goal_type_skills[goal_type] = {}
+            if task_sig not in task_signatures:
+                task_signatures[task_sig] = {}
             
             if skill_name:
-                if skill_name not in goal_type_skills[goal_type]:
-                    goal_type_skills[goal_type][skill_name] = {"success": 0, "total": 0}
+                if skill_name not in task_signatures[task_sig]:
+                    task_signatures[task_sig][skill_name] = {"success": 0, "total": 0}
                 
-                goal_type_skills[goal_type][skill_name]["total"] += 1
+                task_signatures[task_sig][skill_name]["total"] += 1
                 if status == "completed":
-                    goal_type_skills[goal_type][skill_name]["success"] += 1
+                    task_signatures[task_sig][skill_name]["success"] += 1
         
         cache = {}
-        for goal_type, skills in goal_type_skills.items():
+        for task_sig, skills in task_signatures.items():
             best_skill = None
             best_rate = 0.0
             best_count = 0
@@ -235,31 +258,61 @@ class TraceMiningEngine:
                     best_skill = skill
             
             if best_skill:
-                cache[goal_type] = {
+                cache[task_sig] = {
                     "skill": best_skill,
                     "confidence": best_rate,
-                    "usage_count": best_count
+                    "usage_count": best_count,
+                    "goal_type": task_sig.split(":")[0],
+                    "capabilities": task_sig.split(":")[1].split("_") if ":" in task_sig and len(task_sig.split(":")) > 1 else []
                 }
         
         self._cognitive_cache = cache
         return cache
     
-    async def get_best_skill(self, goal_title: str = "", goal_type: str = "") -> Optional[str]:
+    async def get_best_skill(
+        self, 
+        goal_title: str = "", 
+        goal_type: str = "",
+        capabilities: List[str] = None,
+        required_artifacts: List[str] = None
+    ) -> Optional[str]:
         """Получить лучший skill для goal без LLM
         
         Args:
             goal_title: Title of the goal (for fallback keyword matching)
             goal_type: Type of the goal (achievable, continuous, directional, exploratory, meta)
+            capabilities: List of required capabilities
+            required_artifacts: List of required artifact types
         """
+        if capabilities is None:
+            capabilities = []
+        if required_artifacts is None:
+            required_artifacts = []
+            
         if not self._cognitive_cache:
             await self.build_cognitive_cache()
         
         if not self._cognitive_cache:
             return None
         
+        # Build task_signature for lookup
+        task_sig = goal_type
+        if capabilities:
+            caps_str = "_".join(sorted(capabilities[:3]))
+            task_sig = f"{goal_type}:{caps_str}"
+        if required_artifacts:
+            arts_str = "_".join(sorted(required_artifacts[:2]))
+            task_sig = f"{task_sig}:{arts_str}"
+        
+        # Try exact match
+        if task_sig in self._cognitive_cache:
+            return self._cognitive_cache[task_sig]["skill"]
+        
+        # Try goal_type only match
         if goal_type and goal_type in self._cognitive_cache:
             return self._cognitive_cache[goal_type]["skill"]
         
+        # Try keyword matching
         if goal_title:
             goal_lower = goal_title.lower()
             
@@ -267,11 +320,19 @@ class TraceMiningEngine:
                 if cached_type.lower() in goal_lower or goal_lower in cached_type.lower():
                     return info["skill"]
             
+            # Fallback to highest confidence
             best = max(self._cognitive_cache.items(), 
                       key=lambda x: (x[1]["confidence"], x[1]["usage_count"]))
             return best[1]["skill"]
         
         return None
+    
+    async def get_best_skill_by_type(self, goal_type: str) -> Optional[Dict[str, Any]]:
+        """Получить лучший skill для конкретного goal_type"""
+        if not self._cognitive_cache:
+            await self.build_cognitive_cache()
+        
+        return self._cognitive_cache.get(goal_type)
     
     async def get_best_skill_by_type(self, goal_type: str) -> Optional[Dict[str, Any]]:
         """Получить лучший skill для конкретного goal_type"""
