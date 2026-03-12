@@ -12,13 +12,30 @@ Trace Store - Persistent хранилище execution traces для AI-OS Learni
 import asyncio
 import json
 import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from uuid import uuid4
 
-import structlog
 
-logger = structlog.get_logger(__name__)
+def get_logger():
+    """Get logger - structlog if available, else standard logging"""
+    try:
+        import structlog
+        return structlog.get_logger(__name__)
+    except ImportError:
+        class SimpleLogger:
+            def info(self, msg, **kwargs):
+                print(f"[INFO] {msg} {kwargs}", file=sys.stderr)
+            def warning(self, msg, **kwargs):
+                print(f"[WARNING] {msg} {kwargs}", file=sys.stderr)
+            def debug(self, msg, **kwargs):
+                print(f"[DEBUG] {msg} {kwargs}", file=sys.stderr)
+            def error(self, msg, **kwargs):
+                print(f"[ERROR] {msg} {kwargs}", file=sys.stderr)
+        return SimpleLogger()
+
+logger = get_logger()
 
 
 class TraceStore:
