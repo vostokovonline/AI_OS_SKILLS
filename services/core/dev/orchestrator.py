@@ -102,10 +102,22 @@ class TaskRouter:
 
 
 class ContextBuilder:
-    """Построение контекста для LLM"""
+    """Построение контекста для LLM - использует ContextSelector"""
     
-    def __init__(self, code_graph=None):
+    def __init__(self, code_graph=None, root_path: str = None):
         self.code_graph = code_graph
+        self.root_path = root_path
+        self._selector = None
+        
+    def _get_selector(self):
+        """Lazy load context selector"""
+        if self._selector is None:
+            try:
+                from dev.context_selector import ContextSelector
+                self._selector = ContextSelector(self.code_graph, self.root_path)
+            except ImportError:
+                self._selector = None
+        return self._selector
         
     def build(self, goal: DevelopmentGoal) -> str:
         """Построить контекст для задачи"""
@@ -114,9 +126,23 @@ class ContextBuilder:
         # Add goal description
         context_parts.append(f"# Development Goal\n{goal.description}")
         
-        # Add target code if specified
-        if goal.target and self.code_graph:
-            related_nodes = self.code_graph.find_related(goal.target, limit=5)
+        # Try using ContextSelector for smart context building
+        selector = self._get_selector()
+        if selector and goal.target:
+            try:
+                pack = selector.select(
+                    target=goal.target,
+                    task_type=goal.goal_type,
+                    model="qwen"
+                )
+                # Use smart context
+                return selector.export_for_llm(pack)
+            except Exception as e:
+                # Fallback to simple context
+                pass
+        
+        # Fallback: simple context building
+        context_parts.append(f"# Target: {goal.target}")
             
             if related_nodes:
                 context_parts.append(f"\n# Related Code\n")
@@ -302,9 +328,9 @@ class DevOrchestrator:
     6. Apply or show for manual approval
     """
     
-    def __init__(self, code_graph=None):
+    def __init__(self, code_graph=None, root_path: str = None):
         self.router = TaskRouter()
-        self.context_builder = ContextBuilder(code_graph)
+        self.context_builder = ContextBuilder(code_graph, root_path)
         self.cli_runner = CLIRunner()
         self.patch_manager = PatchManager()
         
