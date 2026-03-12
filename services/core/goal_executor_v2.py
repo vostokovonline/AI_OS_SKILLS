@@ -1113,7 +1113,7 @@ class GoalExecutorV2:
             }
 
         # WriteFileSkill inputs - use LLM to generate real content
-        if skill_id == "core.writefile":
+        if skill_id == "core.write_file":
             filename = f"{goal_title.lower().replace(' ', '_')}.md"
             import os
             return {
@@ -1122,9 +1122,11 @@ class GoalExecutorV2:
                 "directory": os.getenv("ARTIFACTS_PATH", "/data/artifacts")
             }
 
-        # WebResearchSkill inputs - needs query
+        # WebResearchSkill inputs - needs keywords (list!)
         if skill_id == "core.web_research":
-            return {"query": goal_title or "test"}
+            # Extract actual search query from goal description
+            query = goal_description if len(goal_description) > 10 else goal_title
+            return {"keywords": [query]}
 
         # SummarizeTextSkill - needs text input
         if skill_id == "core.summarize_text":
@@ -2106,7 +2108,7 @@ Format: Markdown"""
             }
 
         # WriteFileSkill inputs - use LLM to generate real content
-        if skill_id == "core.writefile":
+        if skill_id == "core.write_file":
             filename = f"{goal.title.lower().replace(' ', '_')}.md"
 
             # Generate content using LLM
@@ -2120,10 +2122,11 @@ Format: Markdown"""
                 "directory": os.getenv("ARTIFACTS_PATH", "/data/artifacts")
             }
 
-        # WebResearchSkill inputs - needs query
+        # WebResearchSkill inputs - needs keywords (list!)
         if skill_id == "core.web_research":
             # Fallback to simple query if LLM fails
-            return {"query": goal.title or "test"}
+            query = goal.description if len(goal.description or "") > 10 else goal.title
+            return {"keywords": [query]}
 
         # SummarizeTextSkill - needs text input
         if skill_id == "core.summarize_text":
