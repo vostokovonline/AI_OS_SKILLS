@@ -60,29 +60,38 @@ class ExecutionResult:
 
 
 class GoalSelector:
-    """Selects goals ready for execution"""
+    """Selects goals ready for execution
+
+    CRITICAL: Selector is the ONLY place where execution decisions are made.
+    Executor must NEVER receive invalid goals.
+    """
 
     async def select_ready(
         self,
         uow: "UnitOfWork",
         limit: int | None = None
     ) -> list[UUID]:
-        from models import Goal
-        from sqlalchemy import select
+        from sqlalchemy import text
 
-        stmt = select(Goal).where(
-            Goal.is_atomic == True
-        ).where(
-            Goal.progress < 1.0
-        )
-
-        if limit:
-            stmt = stmt.limit(limit)
-
+        # Use raw SQL to avoid import issues with GoalDependency
+        # Check for unsatisfied dependencies via raw SQL
+        limit_clause = f"LIMIT {limit}" if limit else ""
+        stmt = text(f"""
+            SELECT g.id FROM goals g
+            WHERE g.status = 'pending'
+            AND g.is_atomic = true
+            AND (g.progress < 1.0 OR g.progress IS NULL)
+            AND NOT EXISTS (
+                SELECT 1 FROM goal_dependencies gd
+                JOIN goals gp ON gp.id = gd.depends_on_goal_id
+                WHERE gd.goal_id = g.id AND gp.status != 'done'
+            )
+            ORDER BY g.created_at ASC
+            {limit_clause}
+        """)
+        
         result = await uow.session.execute(stmt)
-        goals = result.scalars().all()
-
-        return [g.id for g in goals]
+        return [row[0] for row in result.fetchall()]
 
 
 class ExecuteReadyGoalsUseCase:
@@ -205,6 +214,9 @@ class ExecuteReadyGoalsUseCase:
                             error=None
                         )
                     )
+                    import logging
+                    logger = logging.getLogger("use_cases")
+                    logger.info(f"intent_created_with_artifacts: goal_id={str(goal_id)[:8]}, outcome={outcome.status}, confidence={outcome.confidence}, artifacts_count={len(artifact_data_list)}")
 
                 except Exception as e:
                     import logging
@@ -242,6 +254,9 @@ class ExecuteReadyGoalsUseCase:
         selected_intents = [s.intent for s in arbitration_result.selected]
 
         import logging
+        logger = logging.getLogger("use_cases")
+        logger.info(f"before_apply_batch: selected_count={len(selected_intents)}, intents_with_artifacts={[(str(i.goal_id)[:8], len(i.artifacts)) for i in selected_intents]}")
+
         logger = logging.getLogger("arbitration")
         logger.info(
             f"arbitration_completed: total={len(intents)}, "

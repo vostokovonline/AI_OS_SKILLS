@@ -22,6 +22,15 @@ from models import Artifact, Goal
 from artifact_verifier import artifact_verifier, VerificationResult
 from infrastructure.uow import UnitOfWork
 
+# NEW: Event emission for Metrics Engine
+from application.events.bus import get_event_bus
+from application.events.execution_events import ArtifactCreated
+
+# NEW: Logging
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class ArtifactRegistry:
     """
@@ -188,6 +197,22 @@ class ArtifactRegistry:
             except Exception as e:
                 logger.info(f"⚠️ Failed to generate description: {e}")
                 description = None
+
+        # Emit ArtifactCreated event for Metrics Engine
+        event_bus = get_event_bus()
+        await event_bus.publish(ArtifactCreated(
+            artifact_id=artifact.id,
+            goal_id=artifact.goal_id,
+            skill_id=skill_name or "unknown",
+            artifact_type=artifact_type,
+            content_kind=content_kind
+        ))
+        logger.info(
+            "artifact_created_event_emitted",
+            artifact_id=str(artifact.id),
+            goal_id=str(artifact.goal_id),
+            artifact_type=artifact_type
+        )
 
         return {
             "artifact_id": str(artifact.id),

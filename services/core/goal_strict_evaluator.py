@@ -6,6 +6,7 @@ GOAL STRICT EVALUATOR - v3.0
 ARCHITECTURE v3.0:
 - Uses UnitOfWork pattern for transaction management
 - Integrates EmotionalFeedbackLoop for memory
+- SHADOW MODE: Logs gateway decisions for analysis
 """
 import uuid
 from typing import Dict, Optional
@@ -20,6 +21,72 @@ from goal_contract_validator import goal_contract_validator
 from infrastructure.uow import UnitOfWork, GoalRepository
 from goal_transition_service import transition_service
 from emotional_feedback_loop import emotional_feedback_loop
+from logging_config import get_logger
+
+# NEW: Event emission for Metrics Engine
+from application.events.bus import get_event_bus
+from application.events.goal_events import GoalCompleted, GoalFailed
+
+logger = get_logger(__name__)
+
+
+async def shadow_evaluate_decision(
+    session,
+    goal_id,
+    legacy_decision: str
+) -> Dict[str, any]:
+    """
+    SHADOW MODE: Evaluate decision via Gateway without committing.
+    
+    Compares legacy decision with gateway decision and logs divergence.
+    This is for OBSERVATION ONLY - does not modify goal status.
+    """
+    try:
+        # Handle both UUID and SQLAlchemy Column
+        if hasattr(goal_id, 'value'):
+            goal_id = goal_id.value
+        
+        from autonomy.goal_decision_gateway import get_decision_gateway
+        
+        gateway = get_decision_gateway()
+        
+        packet = await gateway.collect_evidence(session, goal_id)
+        shadow_decision = gateway.evaluate(packet)
+        
+        legacy = legacy_decision
+        gateway_status = shadow_decision.new_status
+        
+        match = legacy == gateway_status
+        
+        logger.info(
+            "shadow_decision_comparison",
+            goal_id=str(goal_id)[:8],
+            legacy_decision=legacy,
+            gateway_decision=gateway_status,
+            match=match,
+            reason=shadow_decision.reason,
+            belief_confidence=packet.belief_confidence,
+            has_authority=packet.has_authority,
+            strict_verdict=packet.strict_verdict
+        )
+        
+        return {
+            "match": match,
+            "legacy": legacy,
+            "gateway": gateway_status,
+            "reason": shadow_decision.reason,
+            "belief_confidence": packet.belief_confidence
+        }
+    except Exception as e:
+        logger.warning(
+            "shadow_evaluation_failed",
+            goal_id=str(goal_id)[:8],
+            error=str(e)
+        )
+        return {
+            "match": None,
+            "error": str(e)
+        }
 
 
 class GoalStrictEvaluator:
@@ -93,6 +160,13 @@ class GoalStrictEvaluator:
                 parent.status = "done"
                 parent.progress = 1.0
                 parent.completed_at = datetime.now()
+                
+                try:
+                    from database import AsyncSessionLocal
+                    async with AsyncSessionLocal() as session:
+                        await shadow_evaluate_decision(session, parent.id, "done")
+                except Exception:
+                    pass  # SHADOW MODE: never break legacy flow
 
         if parent.completion_mode == 'strict':
             return
@@ -220,6 +294,10 @@ class GoalStrictEvaluator:
                         g.progress = 1.0
                         g.completed_at = datetime.now()
                         
+                        from database import AsyncSessionLocal
+                        async with AsyncSessionLocal() as session:
+                            await shadow_evaluate_decision(session, g.id, "done")
+                        
                         # 🧠 MEMORY: Record to EmotionalFeedbackLoop
                         await self._record_completion(g, passed=True, score=1.0)
                     await db.commit()
@@ -298,6 +376,13 @@ class GoalStrictEvaluator:
                     if passed:
                         g.status = "done"
                         g.completed_at = datetime.now()
+                        
+                        try:
+                            from database import AsyncSessionLocal
+                            async with AsyncSessionLocal() as session:
+                                await shadow_evaluate_decision(session, g.id, "done")
+                        except Exception:
+                            pass  # SHADOW MODE
                         
                         # 🧠 MEMORY: Record to EmotionalFeedbackLoop
                         await self._record_completion(g, passed=True, score=score)
@@ -454,6 +539,11 @@ class GoalStrictEvaluator:
                 actor="goal_strict_evaluator"
             )
 
+            # Emit GoalCompleted event for Metrics Engine
+            event_bus = get_event_bus()
+            await event_bus.publish(GoalCompleted(goal_id=goal.id))
+            logger.info("goal_completed_event_emitted", goal_id=str(goal.id))
+
         return {
             "passed": artifacts_check["passed"],
             "evaluation_mode": "binary",
@@ -475,6 +565,11 @@ class GoalStrictEvaluator:
                 reason=f"Scalar evaluation passed: {score:.2f} >= 0.80",
                 actor="goal_strict_evaluator"
             )
+
+            # Emit GoalCompleted event for Metrics Engine
+            event_bus = get_event_bus()
+            await event_bus.publish(GoalCompleted(goal_id=goal.id))
+            logger.info("goal_completed_event_emitted", goal_id=str(goal.id))
 
         return {
             "passed": passed,

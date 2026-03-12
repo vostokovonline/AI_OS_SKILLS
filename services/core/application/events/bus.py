@@ -31,13 +31,16 @@ class EventBus:
     
     async def publish(self, event: Any) -> None:
         """Опубликовать одно событие"""
+        import logging
+        logger = logging.getLogger("event_bus")
+        logger.info(f"event_published: {type(event).__name__}")
         handlers = self._subs.get(type(event), [])
+        logger.info(f"event_subscribers: {type(event).__name__}, count={len(handlers)}")
         for handler in handlers:
             try:
                 await handler(event)
             except Exception as e:
-                import logging
-                logging.getLogger("event_bus").error(
+                logger.error(
                     f"event_handler_error: event_type={type(event).__name__}, error={str(e)}"
                 )
     

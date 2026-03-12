@@ -7,7 +7,7 @@ from pydantic import BaseModel
 import httpx
 import sqlalchemy
 from database import engine, Base, get_db, AsyncSessionLocal
-from infrastructure.uow import create_uow_provider, UnitOfWork
+from infrastructure.uow import create_uow_provider, UnitOfWork, get_uow
 from models import Message, ChatSession, Goal, GoalRelation, InterventionCandidate, InterventionSimulation, InterventionRiskScore, InterventionApproval
 from schemas import (
     MessageCreate, MessageResponse, ResumeRequest, EventRequest,
@@ -45,6 +45,40 @@ from api.admin.observer import router as observer_admin_router
 # Phase 2.4.5: Reflection Admin API
 from api.admin.reflection import router as reflection_admin_router
 
+# v3.0: Arbitration API (Decision System)
+from application.api.arbitration_endpoints import router as arbitration_router
+from application.api.arbitration_endpoints import set_arbitration_log, set_capital_allocator
+
+# Analytics API (LLM, System Health, Performance)
+from application.api.analytics_endpoints import router as analytics_router
+
+# LLM Control Center API (Model recommendations, policy simulation)
+from application.api.llm_control_endpoints import router as llm_control_router
+
+# Decision Trace Layer (Explainable model selection)
+from application.api.decision_trace_endpoints import decision_router as decision_trace_router
+
+# Shadow Switching Layer (Safe path to auto-switch)
+from application.api.shadow_switching_endpoints import shadow_router as shadow_switching_router
+
+# Outcome Tracking Layer (Real performance validation)
+from application.api.outcome_tracking_endpoints import outcome_router as outcome_tracking_router
+
+# Execution Orchestrator Layer (Production-grade state machine)
+from application.api.execution_endpoints import execution_router
+
+# Goals API Endpoints
+from api.endpoints.goals import router as goals_router
+
+# Admin API Endpoints (BUG-002 fix)
+from api.endpoints.admin import router as admin_router
+
+# Skills API Endpoints (autoloader integration)
+from api.endpoints.skills import router as skills_router
+
+# Control Center API (Metrics Engine)
+from api.endpoints.control_center import router as control_center_router
+
 app = FastAPI()
 
 # SECURITY: Limit CORS to specific origins
@@ -67,6 +101,47 @@ app.include_router(observer_admin_router)
 
 # Phase 2.4.5: Include reflection admin router
 app.include_router(reflection_admin_router)
+
+# v3.0: Include arbitration router
+app.include_router(arbitration_router)
+
+# Analytics router
+app.include_router(analytics_router)
+
+# LLM Control Center router
+app.include_router(llm_control_router)
+
+# Decision Trace router
+app.include_router(decision_trace_router)
+
+# Shadow Switching router
+app.include_router(shadow_switching_router)
+
+# Outcome Tracking router
+app.include_router(outcome_tracking_router)
+
+# Execution Orchestrator router
+app.include_router(execution_router)
+
+# Goals API router
+app.include_router(goals_router)
+
+# Admin API router (execution recovery)
+app.include_router(admin_router)
+
+# Control Center router
+app.include_router(control_center_router)
+
+# Skills API router (autoloader)
+app.include_router(skills_router)
+
+# Phase 2A: Execution V3 Metrics
+from execution_v3_metrics import router as execution_v3_router
+app.include_router(execution_v3_router)
+
+# Model Rotation Monitoring (NEW)
+from api.endpoints.model_rotation_endpoints import router as model_rotation_router
+app.include_router(model_rotation_router)
 
 # UoW Provider for dependency injection
 uow_provider = create_uow_provider()
@@ -106,6 +181,119 @@ async def startup():
     await wait_for_db()
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
     await bootstrap_dna()
+
+    # Configure goal dispatcher for queue-based execution
+    from application.goal_dispatcher import configure_dispatcher
+    from celery_config import celery_app
+    configure_dispatcher(celery_app)
+    logger.info("✓ GoalDispatcher configured")
+
+    # v3.0: Inject arbitration components into API endpoints
+    from scheduler import _get_use_cases
+    use_cases = _get_use_cases()
+
+    arbitrator = use_cases.get("arbitrator")
+    capital_allocator = use_cases.get("capital_allocator")
+
+    if arbitrator and hasattr(arbitrator, "_log"):
+        set_arbitration_log(arbitrator._log)
+        logger.info("✓ Arbitration log injected into API")
+
+    if capital_allocator:
+        set_capital_allocator(capital_allocator)
+        logger.info("✓ Capital allocator injected into API")
+
+    # Auto-load skills from canonical_skills/ (Unified Service)
+    from unified_skill_service import load_and_register_skills
+    skills_count = load_and_register_skills()
+    logger.info(f"✓ Unified Skill Service loaded {skills_count} skills")
+
+    # Metrics Engine: Initialize and subscribe to event bus
+    from metrics_engine import MetricsEngine, set_metrics_engine
+    from application.events.bus import get_event_bus
+    from application.events.goal_events import GoalActivated, GoalCompleted, GoalFailed
+    from application.events.execution_events import SkillExecuted, ArtifactCreated, GoalExecutionFinished
+    import os
+
+    # Use docker service name for Redis
+    redis_url = os.getenv("REDIS_URL", "redis://ns_redis:6379/0")
+
+    metrics_engine = MetricsEngine(
+        redis_url=redis_url,
+        postgres_session_factory=AsyncSessionLocal
+    )
+
+    # Subscribe to canonical events
+    event_bus = get_event_bus()
+    event_bus.subscribe(GoalActivated, metrics_engine.handle_event)
+    event_bus.subscribe(GoalCompleted, metrics_engine.handle_event)
+    event_bus.subscribe(GoalFailed, metrics_engine.handle_event)
+    event_bus.subscribe(SkillExecuted, metrics_engine.handle_event)
+    event_bus.subscribe(ArtifactCreated, metrics_engine.handle_event)
+
+    # Subscribe to Execution Trace Events
+    from application.events.execution_events import (
+        GoalExecutionStarted, SkillSelected, ArtifactProduced, 
+        GoalEvaluated, GoalTransitioned, GoalExecutionFinished
+    )
+    
+    # Simple logging handlers for Execution Trace
+    async def log_goal_started(event):
+        from logging_config import get_logger
+        logger = get_logger("execution_trace")
+        logger.info(f"GOAL_STARTED: {event.goal_id} - {event.goal_title}")
+    
+    async def log_skill_selected(event):
+        from logging_config import get_logger
+        logger = get_logger("execution_trace")
+        logger.info(f"SKILL_SELECTED: {event.goal_id} - {event.skill_name} (score={event.score})")
+    
+    async def log_artifact_produced(event):
+        from logging_config import get_logger
+        logger = get_logger("execution_trace")
+        logger.info(f"ARTIFACT_PRODUCED: {event.goal_id} - {event.artifact_type}")
+    
+    async def log_goal_evaluated(event):
+        from logging_config import get_logger
+        logger = get_logger("execution_trace")
+        logger.info(f"GOAL_EVALUATED: {event.goal_id} - {event.outcome} (confidence={event.confidence})")
+    
+    async def log_goal_transitioned(event):
+        from logging_config import get_logger
+        logger = get_logger("execution_trace")
+        logger.info(f"GOAL_TRANSITIONED: {event.goal_id} - {event.from_state} → {event.to_state}")
+    
+    event_bus.subscribe(GoalExecutionStarted, log_goal_started)
+    event_bus.subscribe(SkillSelected, log_skill_selected)
+    event_bus.subscribe(ArtifactProduced, log_artifact_produced)
+    event_bus.subscribe(GoalEvaluated, log_goal_evaluated)
+    event_bus.subscribe(GoalTransitioned, log_goal_transitioned)
+
+    # Initialize and subscribe Trace Collector
+    from trace_store import get_trace_store
+    from trace_collector import get_trace_collector
+    trace_store = get_trace_store()
+    await trace_store.initialize()
+    trace_collector = get_trace_collector(trace_store)
+    
+    # Subscribe to all execution events for trace collection
+    event_bus.subscribe(GoalExecutionStarted, trace_collector.handle_goal_started)
+    event_bus.subscribe(SkillSelected, trace_collector.handle_skill_selected)
+    event_bus.subscribe(ArtifactProduced, trace_collector.handle_artifact_produced)
+    event_bus.subscribe(GoalEvaluated, trace_collector.handle_goal_evaluated)
+    event_bus.subscribe(GoalTransitioned, trace_collector.handle_goal_transitioned)
+    event_bus.subscribe(GoalExecutionFinished, trace_collector.handle_goal_execution_finished)
+
+    logger.info("✓ Trace Collector initialized and subscribed to event bus")
+
+    # Start periodic batch flush
+    await metrics_engine.start_periodic_flush()
+
+    # Store as singleton for API access
+    set_metrics_engine(metrics_engine)
+
+    logger.info("✓ Metrics Engine initialized and subscribed to event bus")
+
     start_scheduler()
     logger.info("🚀 SYSTEM ONLINE")
 
@@ -334,22 +522,98 @@ async def create_goal_endpoint(req: GoalRequest, uow: UnitOfWork = Depends(get_u
         }
 
 @app.post("/goals/execute")
-async def execute_goal(req: ExecuteGoalRequest):
-    """Выполняет существующую цель - использует V2 для atomic целей"""
-    # Check if goal is atomic - use V2
-    from models import Goal
-    from database import AsyncSessionLocal
-    import uuid
+async def execute_goal(
+    req: ExecuteGoalRequest,
+    uow = Depends(get_uow)
+):
+    """
+    Execution endpoint v4.2 - UnitOfWork-based execution.
 
-    async with AsyncSessionLocal() as db:
-        stmt = select(Goal).where(Goal.id == uuid.UUID(req.goal_id))
-        result = await db.execute(stmt)
-        goal = result.scalar_one_or_none()
+    TEMPORARY: Type checking to debug UoW injection
+    """
+    from infrastructure.uow import UnitOfWork
 
-        # Orchestrator (V1) handles atomic vs complex internally
-        result = await goal_executor.execute_goal(req.goal_id, req.session_id)
+    # ЖЁСТКИЙ ТЕСТ: проверяем что именно приходит
+    result_data = {
+        "uow_type": str(type(uow)),
+        "uow_is_none": uow is None,
+        "has_aenter": hasattr(uow, "__aenter__"),
+        "has_aexit": hasattr(uow, "__aexit__"),
+        "is_unitofwork": isinstance(uow, UnitOfWork),
+        "is_callable": callable(uow)
+    }
+
+    # Если приходит не UnitOfWork - сразу фейлим
+    if not isinstance(uow, UnitOfWork):
+        return {
+            "error": "UoW_INJECTION_FAILED",
+            "debug": result_data,
+            "expected": "UnitOfWork instance",
+            "got": type(uow)
+        }
+
+    # Execute with UoW - ONE atomic transaction
+    async with uow:
+        result = await goal_executor_v2.execute_goal(
+            goal_id=req.goal_id,
+            uow=uow,
+            session_id=req.session_id
+        )
 
     return result
+
+@app.post("/goals/bulk/activate")
+async def bulk_activate_goals(
+    uow: UnitOfWork = Depends(get_uow)
+):
+    """
+    BEHAVIOURAL TEST: Bulk transition with 10 goals
+
+    Proves that BulkTransitionEngine applies ALL transitions
+    in ONE atomic transaction.
+
+    Process:
+    1. Find 10 pending goals
+    2. Apply bulk activation via BulkTransitionEngine
+    3. Verify atomic commit
+    """
+    from application.bulk_transition_engine import bulk_transition_engine
+    from sqlalchemy import select
+    from models import Goal
+
+    # ONE transaction for both load and apply
+    async with uow:
+        # Phase 1: Load 10 pending goals
+        stmt = select(Goal).where(Goal._status == 'pending').limit(10)
+        result = await uow.session.execute(stmt)
+        goals = result.scalars().all()
+
+        if not goals:
+            return {
+                "status": "error",
+                "message": "No pending goals found for bulk test"
+            }
+
+        goal_ids = [g.id for g in goals]
+
+        # Phase 2: Apply bulk transition (inside SAME transaction)
+        bulk_result = await bulk_transition_engine.execute_batch(
+            uow=uow,
+            goal_ids=goal_ids,
+            actor="behavioural_test"
+        )
+
+    return {
+        "status": "completed",
+        "bulk_result": {
+            "total": bulk_result.total,
+            "succeeded": bulk_result.succeeded,
+            "failed": bulk_result.failed,
+            "blocked": bulk_result.blocked,
+            "execution_time_ms": bulk_result.execution_time_ms
+        },
+        "message": f"Bulk transition completed: {bulk_result.succeeded}/{bulk_result.total} succeeded"
+    }
 
 @app.post("/goals/complex")
 async def execute_complex_goal(req: ComplexGoalRequest):
@@ -1612,7 +1876,7 @@ async def test_llm(request: dict):
 # ============= DASHBOARD V2 API ENDPOINTS =============
 
 from fastapi.responses import StreamingResponse
-from typing import Optional, Dict
+from typing import Optional, Dict, Any
 import json
 
 
@@ -2463,6 +2727,10 @@ async def check_question_timeouts():
                                 reason=f"Question timed out: {content.get('question', 'Unknown')[:100]}",
                                 actor="system"
                             )
+
+                            # Emit GoalFailed event for Metrics Engine
+                            event_bus = get_event_bus()
+                            await event_bus.publish(GoalFailed(goal_id=goal.id))
 
                             processed.append({
                                 "question_id": str(artifact.id),
@@ -5750,5 +6018,1076 @@ async def get_occp_info():
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+# =============================================================================
+# MCP (Modular Capability Plugin) API Endpoints
+# =============================================================================
+
+@app.get("/mcp/status")
+async def get_mcp_status():
+    """
+    GET /mcp/status
+
+    Get MCP system status and statistics
+    """
+    try:
+        from mcp_manager import mcp_manager
+        from mcp_skill_generator import mcp_skill_generator
+        from sqlalchemy import select, func
+        from autogenerated_skill_models import AutogeneratedSkill
+        from database import AsyncSessionLocal
+
+        # Get registry stats
+        active_count = len(mcp_skill_generator._registry)
+        active_generations = len(mcp_skill_generator._active_generations)
+
+        # Get database stats
+        async with AsyncSessionLocal() as session:
+            # Total skills
+            total_stmt = select(func.count(AutogeneratedSkill.id))
+            total_result = await session.execute(total_stmt)
+            total_count = total_result.scalar() or 0
+
+            # By status
+            status_stmt = select(
+                AutogeneratedSkill.status,
+                func.count(AutogeneratedSkill.id)
+            ).group_by(AutogeneratedSkill.status)
+            status_result = await session.execute(status_stmt)
+            status_counts = {row[0]: row[1] for row in status_result}
+
+        return {
+            "status": "ok",
+            "mcp": {
+                "connected": mcp_manager._connected,
+                "active_plugins": active_count,
+                "active_generations": active_generations,
+                "max_plugins": mcp_skill_generator.MAX_PLUGINS,
+                "max_concurrent": mcp_skill_generator.MAX_CONCURRENT_GENERATIONS,
+                "cooldown_seconds": mcp_skill_generator.GENERATION_COOLDOWN_SECONDS
+            },
+            "database": {
+                "total_skills": total_count,
+                "by_status": status_counts
+            },
+            "config": {
+                "pruning_threshold_days": mcp_skill_generator.PRUNING_THRESHOLD_DAYS,
+                "min_success_rate": mcp_skill_generator.MIN_SUCCESS_RATE_FOR_RETENTION
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/mcp/plugins")
+async def list_mcp_plugins(
+    status_filter: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """
+    GET /mcp/plugins?status={experimental|stable|deprecated|failed}&limit=50&offset=0
+
+    List MCP plugins with filtering and pagination
+    """
+    try:
+        from mcp_skill_generator import mcp_skill_generator
+
+        plugins = []
+
+        for plugin_id, plugin in mcp_skill_generator._registry.items():
+            if status_filter and plugin.status != status_filter:
+                continue
+
+            # Calculate generation duration
+            duration = None
+            if plugin.generation_completed_at and plugin.generation_started_at:
+                duration = (plugin.generation_completed_at - plugin.generation_started_at).total_seconds()
+
+            plugins.append({
+                "plugin_id": plugin.plugin_id,
+                "version": plugin.version,
+                "status": plugin.status,
+                "generation_status": plugin.generation_status,
+                "capabilities": plugin.capabilities,
+                "execution_count": plugin.execution_count,
+                "success_count": plugin.success_count,
+                "success_rate": plugin.success_rate,
+                "created_at": plugin.created_at.isoformat(),
+                "generation_duration_s": duration,
+                "generation_error": plugin.generation_error
+            })
+
+        # Sort by created_at (newest first)
+        plugins.sort(key=lambda p: p["created_at"], reverse=True)
+
+        # Apply pagination
+        total = len(plugins)
+        plugins = plugins[offset:offset + limit]
+
+        return {
+            "status": "ok",
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "plugins": plugins
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/mcp/plugins/{plugin_id}")
+async def get_mcp_plugin(plugin_id: str):
+    """
+    GET /mcp/plugins/{plugin_id}
+
+    Get detailed info about a specific MCP plugin
+    """
+    try:
+        from mcp_skill_generator import mcp_skill_generator
+
+        plugin = await mcp_skill_generator.get_plugin(plugin_id)
+
+        if not plugin:
+            raise HTTPException(status_code=404, detail=f"Plugin not found: {plugin_id}")
+
+        # Calculate generation duration
+        duration = None
+        if plugin.generation_completed_at and plugin.generation_started_at:
+            duration = (plugin.generation_completed_at - plugin.generation_started_at).total_seconds()
+
+        return {
+            "status": "ok",
+            "plugin": {
+                "plugin_id": plugin.plugin_id,
+                "version": plugin.version,
+                "status": plugin.status,
+                "generation_status": plugin.generation_status,
+                "capabilities": plugin.capabilities,
+                "execution_count": plugin.execution_count,
+                "success_count": plugin.success_count,
+                "success_rate": plugin.success_rate,
+                "created_at": plugin.created_at.isoformat(),
+                "generation_started_at": plugin.generation_started_at.isoformat(),
+                "generation_completed_at": plugin.generation_completed_at.isoformat() if plugin.generation_completed_at else None,
+                "generation_duration_s": duration,
+                "generation_error": plugin.generation_error
+            }
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/mcp/metrics")
+async def get_mcp_metrics():
+    """
+    GET /mcp/metrics
+
+    Get MCP performance metrics
+    """
+    try:
+        from mcp_skill_generator import mcp_skill_generator
+        from sqlalchemy import select, func
+        from autogenerated_skill_models import AutogeneratedSkill
+        from database import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            # Success rate by validation status
+            validation_stmt = select(
+                AutogeneratedSkill.validation_status,
+                func.count(AutogeneratedSkill.id)
+            ).group_by(AutogeneratedSkill.validation_status)
+            validation_result = await session.execute(validation_stmt)
+            validation_counts = {row[0]: row[1] for row in validation_result}
+
+            # Skills by generation trigger
+            trigger_stmt = select(
+                AutogeneratedSkill.generation_trigger,
+                func.count(AutogeneratedSkill.id)
+            ).group_by(AutogeneratedSkill.generation_trigger)
+            trigger_result = await session.execute(trigger_stmt)
+            trigger_counts = {row[0]: row[1] for row in trigger_result}
+
+        # Calculate success rate from registry (actual executions)
+        total_executions = 0
+        total_successes = 0
+
+        for plugin in mcp_skill_generator._registry.values():
+            total_executions += plugin.execution_count
+            total_successes += plugin.success_count
+
+        execution_success_rate = total_successes / total_executions if total_executions > 0 else 0.0
+
+        return {
+            "status": "ok",
+            "metrics": {
+                "total_plugins": len(mcp_skill_generator._registry),
+                "total_executions": total_executions,
+                "total_successes": total_successes,
+                "execution_success_rate": execution_success_rate,
+                "validation_stats": validation_counts,
+                "generation_triggers": trigger_counts
+            }
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/trace/stats")
+async def get_trace_stats():
+    """
+    GET /trace/stats
+    
+    Get execution trace statistics - skill usage, success rates, patterns
+    """
+    try:
+        from trace_store import get_trace_store
+        from trace_mining_engine import get_mining_engine
+        
+        trace_store = get_trace_store()
+        mining_engine = get_mining_engine(trace_store)
+        
+        stats = await trace_store.get_stats()
+        success_rates = await mining_engine.analyze_skill_success_rate(
+            await trace_store.get_all_traces(limit=500)
+        )
+        
+        return {
+            "status": "ok",
+            "trace_stats": stats,
+            "skill_success_rates": success_rates
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/mcp/generate")
+async def trigger_mcp_generation(request: Dict[str, Any]):
+    """
+    POST /mcp/generate
+
+    Manually trigger MCP skill generation
+    {
+        "capabilities": ["stock_analysis"],
+        "requirements": {"input_type": "text", "output_type": "report"},
+        "goal_context": {"title": "Analyze AAPL", "description": "Stock analysis"}
+    }
+    """
+    try:
+        from mcp_manager import mcp_manager
+
+        missing_capabilities = request.get("capabilities", [])
+        requirements = request.get("requirements", {})
+        goal_context = request.get("goal_context")
+
+        # Trigger generation (non-blocking)
+        plugin_id = await mcp_manager.find_or_generate_skill(
+            capabilities=missing_capabilities,
+            requirements=requirements,
+            goal_context=goal_context
+        )
+
+        return {
+            "status": "ok",
+            "plugin_id": plugin_id,
+            "message": "Generation triggered" if plugin_id == "fallback_echo" else "Plugin found or generation started"
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============= CAPABILITY GAP ENGINE =============
+
+@app.get("/capability/stats")
+async def get_capability_stats():
+    """Get capability system statistics from persistent storage"""
+    from capability import capability_gap_engine
+
+    await capability_gap_engine.initialize()
+    stats = await capability_gap_engine.get_stats_async()
+
+    return {
+        "status": "ok",
+        "stats": stats.to_dict()
+    }
+
+
+@app.post("/capability/analyze/{goal_id}")
+async def analyze_goal_for_gaps(goal_id: str):
+    """Analyze a goal for capability gaps"""
+    from capability import capability_gap_engine
+    from models import Goal
+    from database import AsyncSessionLocal
+    from sqlalchemy import select
+    
+    await capability_gap_engine.initialize()
+    
+    async with AsyncSessionLocal() as db:
+        stmt = select(Goal).where(Goal.id == goal_id)
+        result = await db.execute(stmt)
+        goal = result.scalar_one_or_none()
+        
+        if not goal:
+            return {"status": "error", "message": "Goal not found"}
+        
+        gaps = await capability_gap_engine.analyze_goal_for_gaps(goal)
+        
+        return {
+            "status": "ok",
+            "goal_id": str(goal.id),
+            "goal_title": goal.title,
+            "gaps_detected": len(gaps),
+            "gaps": [gap.to_dict() for gap in gaps]
+        }
+
+
+@app.post("/capability/resolve/{gap_id}")
+async def resolve_capability_gap(gap_id: str):
+    """Attempt to resolve a capability gap"""
+    from capability import capability_gap_engine
+    from uuid import UUID
+    
+    await capability_gap_engine.initialize()
+    
+    try:
+        resolution = await capability_gap_engine.resolve_gap(UUID(gap_id))
+        
+        if resolution:
+            return {
+                "status": "ok",
+                "resolution": resolution.to_dict()
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Resolution failed or not possible"
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+
+
+@app.get("/capability/gaps")
+async def list_capability_gaps(status: str = None, limit: int = 100):
+    """List all detected capability gaps from persistent storage"""
+    from capability import capability_gap_engine
+    from capability.models.capability_gap import GapStatus
+
+    await capability_gap_engine.initialize()
+
+    filter_status = GapStatus(status) if status else None
+    gaps = await capability_gap_engine.list_gaps_async(status=filter_status, limit=limit)
+
+    return {
+        "status": "ok",
+        "gaps_count": len(gaps),
+        "gaps": [gap.to_dict() for gap in gaps]
+    }
+
+
+@app.get("/capability/graph")
+async def get_capability_graph():
+    """Get capability graph information"""
+    from capability import capability_graph
+    
+    await capability_graph.initialize()
+    stats = capability_graph.get_stats()
+    
+    return {
+        "status": "ok",
+        "graph": stats
+    }
+
+
+@app.post("/capability/auto-resolve/{goal_id}")
+async def analyze_and_auto_resolve(goal_id: str):
+    """
+    Analyze goal for gaps and automatically resolve all pipeline gaps.
+    
+    This is the auto-learning mechanism - system improves itself after each goal.
+    """
+    from capability import capability_gap_engine
+    from models import Goal
+    from database import AsyncSessionLocal
+    from sqlalchemy import select
+    
+    await capability_gap_engine.initialize()
+    
+    # Load goal
+    async with AsyncSessionLocal() as db:
+        stmt = select(Goal).where(Goal.id == goal_id)
+        result = await db.execute(stmt)
+        goal = result.scalar_one_or_none()
+        
+        if not goal:
+            return {"status": "error", "message": "Goal not found"}
+    
+    # Detect gaps
+    gaps = await capability_gap_engine.analyze_goal_for_gaps(goal)
+    
+    # Auto-resolve all pipeline gaps
+    resolved_count = 0
+    failed_count = 0
+    
+    for gap in gaps:
+        if gap.gap_type == "pipeline":  # Only auto-resolve pipeline gaps
+            resolution = await capability_gap_engine.resolve_gap(gap.gap_id)
+            if resolution and resolution.success:
+                resolved_count += 1
+            else:
+                failed_count += 1
+    
+    return {
+        "status": "ok",
+        "goal_id": str(goal.id),
+        "goal_title": goal.title,
+        "gaps_detected": len(gaps),
+        "pipeline_gaps_resolved": resolved_count,
+        "pipeline_gaps_failed": failed_count,
+        "message": f"Auto-resolved {resolved_count} pipeline gaps"
+    }
+
+
+# ============= CAPABILITY ROUTER (V2) =============
+
+@app.post("/capability/route/{goal_id}")
+async def route_goal_via_capability_system(goal_id: str, auto_resolve_gaps: bool = True):
+    """
+    Route a goal through the Capability OS v2 proactive planning system.
+
+    This is the NEW way to execute goals - plan FIRST, detect gaps SECOND.
+
+    Flow:
+    1. CapabilityPlanner creates execution plan
+    2. CapabilitySelector tries to find existing skills/pipelines
+    3. Only if missing: GapDetector + PipelineComposer
+    4. Return executable plan
+    """
+    from capability import capability_router
+    from models import Goal
+    from database import AsyncSessionLocal
+    from sqlalchemy import select
+
+    await capability_router.initialize()
+
+    # Load goal
+    async with AsyncSessionLocal() as db:
+        stmt = select(Goal).where(Goal.id == goal_id)
+        result = await db.execute(stmt)
+        goal = result.scalar_one_or_none()
+
+        if not goal:
+            return {"status": "error", "message": "Goal not found"}
+
+    # Route through capability system
+    plan = await capability_router.route_goal(goal, auto_resolve_gaps=auto_resolve_gaps)
+
+    return {
+        "status": "ok",
+        "plan": plan.to_dict(),
+        "can_execute": capability_router.can_execute_plan(plan),
+        "summary": {
+            "total_capabilities": plan.total_capabilities,
+            "ready_capabilities": plan.ready_capabilities,
+            "missing_capabilities": plan.missing_capabilities,
+            "reuse_rate": f"{(plan.ready_capabilities / plan.total_capabilities * 100):.1f}%" if plan.total_capabilities > 0 else "0%"
+        }
+    }
+
+
+@app.post("/capability/plan/{goal_id}")
+async def plan_goal_only(goal_id: str):
+    """
+    Create an execution plan for a goal WITHOUT resolving gaps.
+
+    Use this to preview what capabilities are needed before execution.
+    """
+    from capability import capability_planner
+    from models import Goal
+    from database import AsyncSessionLocal
+    from sqlalchemy import select
+
+    await capability_planner.initialize()
+
+    # Load goal
+    async with AsyncSessionLocal() as db:
+        stmt = select(Goal).where(Goal.id == goal_id)
+        result = await db.execute(stmt)
+        goal = result.scalar_one_or_none()
+
+        if not goal:
+            return {"status": "error", "message": "Goal not found"}
+
+    # Create plan
+    plan = await capability_planner.plan_goal(goal)
+
+    return {
+        "status": "ok",
+        "plan": plan.to_dict(),
+        "summary": {
+            "total_capabilities": plan.total_capabilities,
+            "ready_capabilities": plan.ready_capabilities,
+            "missing_capabilities": plan.missing_capabilities
+        }
+    }
+
+
+@app.get("/capability/ontology")
+async def get_capability_ontology():
+    """
+    Get capability ontology (semantic mapping layer).
+
+    This is where Planner vocabulary maps to Registry vocabulary.
+    """
+    from capability import capability_ontology
+
+    stats = capability_ontology.get_stats()
+
+    capabilities = [
+        cap.to_dict()
+        for cap in capability_ontology.get_all_capabilities()
+    ]
+
+    return {
+        "status": "ok",
+        "stats": stats,
+        "capabilities": capabilities
+    }
+
+
+@app.get("/capability/ontology/resolve/{capability}")
+async def resolve_capability_via_ontology(capability: str):
+    """
+    Resolve a capability name through the ontology.
+
+    Shows how Planner names map to Registry names.
+    """
+    from capability import capability_ontology
+
+    resolved = capability_ontology.resolve(capability)
+
+    similar = capability_ontology.find_similar_capabilities(capability, threshold=0.5)
+
+    return {
+        "status": "ok",
+        "input_capability": capability,
+        "resolved_names": resolved,
+        "similar_capabilities": similar,
+        "definition": capability_ontology.get_capability_info(capability)
+    }
+
+
+@app.get("/capability/metrics/skill/{skill_id}")
+async def get_skill_performance_metrics(skill_id: str):
+    """
+    Get real performance metrics for a skill.
+
+    This loads actual data from skill_stats table:
+    - success_rate, avg_latency_ms, avg_confidence
+    - total_executions, failure_count
+    - reliability_score (calculated)
+    - trend (improving/stable/degrading)
+    """
+    from capability import performance_metrics_provider
+
+    metrics = await performance_metrics_provider.get_skill_metrics(
+        skill_id,
+        use_cache=False  # Get fresh data
+    )
+
+    if not metrics:
+        return {
+            "status": "error",
+            "message": f"No metrics found for skill: {skill_id}",
+            "skill_id": skill_id
+        }
+
+    return {
+        "status": "ok",
+        "skill_id": skill_id,
+        "metrics": metrics.to_dict(),
+        "provider_stats": performance_metrics_provider.get_stats()
+    }
+
+
+@app.get("/capability/metrics/top-skills")
+async def get_top_performing_skills(limit: int = 10, min_executions: int = 5):
+    """
+    Get top performing skills by reliability score.
+
+    Reliability score combines:
+    - Success rate (primary)
+    - Execution count (confidence)
+    - Recency (recent usage)
+    """
+    from capability import performance_metrics_provider
+
+    top_skills = await performance_metrics_provider.get_top_skills(
+        limit=limit,
+        min_executions=min_executions
+    )
+
+    return {
+        "status": "ok",
+        "count": len(top_skills),
+        "top_skills": [skill.to_dict() for skill in top_skills],
+        "provider_stats": performance_metrics_provider.get_stats()
+    }
+
+
+@app.post("/capability/metrics/cache/invalidate")
+async def invalidate_metrics_cache():
+    """
+    Invalidate the metrics cache.
+
+    Forces next query to load fresh data from database.
+    """
+    from capability import performance_metrics_provider
+
+    await performance_metrics_provider.invalidate_cache()
+
+    return {
+        "status": "ok",
+        "message": "Metrics cache invalidated",
+        "provider_stats": performance_metrics_provider.get_stats()
+    }
+
+
+# =============================================================================
+# Evolution Worker API Endpoints (Step C - Self-Improving System)
+# =============================================================================
+
+@app.get("/capability/evolution/status")
+async def get_evolution_status():
+    """
+    Get evolution worker status.
+
+    Shows:
+    - Active pipelines and their versions
+    - Reliability scores
+    - Evolution cycle statistics
+    """
+    from capability import evolution_worker
+
+    status = {
+        "is_running": evolution_worker._is_running,
+        "cron_interval_minutes": evolution_worker.CRON_INTERVAL_MINUTES,
+        "min_executions_for_evolution": evolution_worker.MIN_EXECUTIONS_FOR_EVOLUTION,
+        "low_reliability_threshold": evolution_worker.LOW_RELIABILITY_THRESHOLD
+    }
+
+    return {
+        "status": "ok",
+        "worker": status
+    }
+
+
+@app.post("/capability/evolution/run")
+async def run_evolution_cycle():
+    """
+    Manually trigger an evolution cycle.
+
+    This will:
+    1. Evaluate all active pipelines
+    2. Generate mutations for low-performing pipelines
+    3. Test candidate versions
+    4. Promote improvements
+    """
+    from capability import evolution_worker
+
+    logger.info("manual_evolution_cycle_triggered")
+
+    results = await evolution_worker.run_evolution_cycle()
+
+    return {
+        "status": "ok",
+        "message": "Evolution cycle completed",
+        "results": results
+    }
+
+
+@app.post("/capability/evolution/prune")
+async def prune_low_performing_pipelines():
+    """
+    Soft-disable pipelines with very low performance.
+
+    Criteria:
+    - Reliability score < 0.3
+    - At least 10 executions
+    - Success rate < 30%
+    """
+    from capability import evolution_worker
+
+    logger.info("manual_prune_triggered")
+
+    results = await evolution_worker.prune_low_performing_pipelines()
+
+    return {
+        "status": "ok",
+        "message": f"Pruned {results['count']} low-performing pipelines",
+        "results": results
+    }
+
+
+@app.get("/capability/evolution/versions/{pipeline_id}")
+async def get_pipeline_version_history(pipeline_id: str):
+    """
+    Get version history for a pipeline.
+
+    Returns:
+    - All versions (active, candidate, archived, disabled)
+    - Metrics snapshots
+    - Mutation details
+    """
+    from sqlalchemy import text
+    from database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        query = """
+            SELECT
+                version_id,
+                pipeline_id,
+                version_number,
+                status,
+                mutation_type,
+                step_index,
+                old_skill_id,
+                new_skill_id,
+                parameter_changes,
+                mutation_reason,
+                parent_version_id,
+                metrics_snapshot,
+                created_at,
+                promoted_at,
+                archived_at
+            FROM pipeline_versions
+            WHERE pipeline_id = :pipeline_id
+            ORDER BY version_number DESC
+        """
+
+        result = await session.execute(
+            text(query),
+            {"pipeline_id": pipeline_id}
+        )
+        rows = result.fetchall()
+
+        versions = []
+        for row in rows:
+            versions.append({
+                "version_id": str(row.version_id),
+                "pipeline_id": str(row.pipeline_id),
+                "version_number": int(row.version_number),
+                "status": row.status,
+                "mutation_type": row.mutation_type,
+                "step_index": int(row.step_index) if row.step_index else None,
+                "old_skill_id": row.old_skill_id,
+                "new_skill_id": row.new_skill_id,
+                "parameter_changes": row.parameter_changes,
+                "mutation_reason": row.mutation_reason,
+                "parent_version_id": str(row.parent_version_id) if row.parent_version_id else None,
+                "metrics_snapshot": row.metrics_snapshot,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "promoted_at": row.promoted_at.isoformat() if row.promoted_at else None,
+                "archived_at": row.archived_at.isoformat() if row.archived_at else None
+            })
+
+        return {
+            "status": "ok",
+            "pipeline_id": pipeline_id,
+            "count": len(versions),
+            "versions": versions
+        }
+
+
+@app.post("/capability/evolution/rollback/{pipeline_id}")
+async def rollback_pipeline_version(
+    pipeline_id: str,
+    target_version_id: str,
+    reason: str = "Manual rollback"
+):
+    """
+    Rollback a pipeline to a previous version.
+
+    Args:
+        pipeline_id: Pipeline to rollback
+        target_version_id: Version to rollback to
+        reason: Why rollback is happening
+    """
+    from uuid import UUID
+    from capability import evolution_worker
+
+    logger.info(
+        "manual_rollback_triggered",
+        pipeline_id=pipeline_id,
+        target_version_id=target_version_id,
+        reason=reason
+    )
+
+    success = await evolution_worker.rollback_to_version(
+        pipeline_id=UUID(pipeline_id),
+        target_version_id=UUID(target_version_id),
+        rollback_reason=reason
+    )
+
+    if not success:
+        return {
+            "status": "error",
+            "message": "Rollback failed - check logs for details"
+        }
+
+    return {
+        "status": "ok",
+        "message": f"Rolled back {pipeline_id} to version {target_version_id}",
+        "pipeline_id": pipeline_id,
+        "target_version_id": target_version_id,
+        "reason": reason
+    }
+
+
+@app.post("/capability/evolution/promote/{pipeline_id}")
+async def promote_pipeline_version(
+    pipeline_id: str,
+    version_id: str
+):
+    """
+    Promote a candidate version to active.
+
+    This is typically called automatically after A/B testing,
+    but can be triggered manually.
+    """
+    from uuid import UUID
+    from capability import evolution_worker
+
+    logger.info(
+        "manual_promotion_triggered",
+        pipeline_id=pipeline_id,
+        version_id=version_id
+    )
+
+    success = await evolution_worker.promote_version(
+        pipeline_id=UUID(pipeline_id),
+        version_id=UUID(version_id)
+    )
+
+    if not success:
+        return {
+            "status": "error",
+            "message": "Promotion failed - check logs for details"
+        }
+
+    return {
+        "status": "ok",
+        "message": f"Promoted version {version_id} to active",
+        "pipeline_id": pipeline_id,
+        "version_id": version_id
+    }
+
+
+# =============================================================================
+# A/B Testing API Endpoints
+# =============================================================================
+
+@app.get("/capability/ab-testing/stats")
+async def get_ab_testing_stats():
+    """
+    Get A/B testing statistics.
+
+    Shows:
+    - Active tests
+    - Configuration
+    - Test results
+    """
+    from capability import ab_test_engine
+
+    stats = ab_test_engine.get_test_stats()
+    active_tests = ab_test_engine.get_active_tests()
+
+    return {
+        "status": "ok",
+        "stats": stats,
+        "active_tests": [test.to_dict() for test in active_tests]
+    }
+
+
+@app.post("/capability/ab-testing/create")
+async def create_ab_test(
+    pipeline_id: str,
+    candidate_version_id: str,
+    traffic_split: float = 0.10,
+    min_sample_size: int = 20
+):
+    """
+    Create a new A/B test.
+
+    Args:
+        pipeline_id: Pipeline to test
+        candidate_version_id: Candidate version to test
+        traffic_split: Percentage of traffic to route to candidate (0.0-1.0)
+        min_sample_size: Minimum executions per version
+    """
+    from uuid import UUID
+    from capability.ab_testing import ab_test_engine, ABTestConfig
+
+    # Get current active version
+    from sqlalchemy import text
+    from database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        query = """
+            SELECT version_id
+            FROM pipeline_versions
+            WHERE pipeline_id = :pipeline_id
+              AND status = 'active'
+            LIMIT 1
+        """
+
+        result = await session.execute(
+            text(query),
+            {"pipeline_id": pipeline_id}
+        )
+        row = result.fetchone()
+
+        if not row:
+            return {
+                "status": "error",
+                "message": "No active version found for pipeline"
+            }
+
+        current_version_id = row.version_id
+
+    # Create test config
+    config = ABTestConfig(
+        traffic_split_percentage=traffic_split,
+        min_sample_size=min_sample_size
+    )
+
+    # Create test
+    test = await ab_test_engine.create_test(
+        pipeline_id=UUID(pipeline_id),
+        current_version_id=UUID(current_version_id),
+        candidate_version_id=UUID(candidate_version_id),
+        config=config
+    )
+
+    # Start test
+    await ab_test_engine.start_test(test)
+
+    return {
+        "status": "ok",
+        "message": "A/B test created and started",
+        "test": test.to_dict()
+    }
+
+
+@app.get("/capability/ab-testing/tests/{test_id}")
+async def get_ab_test_details(test_id: str):
+    """
+    Get details of a specific A/B test.
+    """
+    from uuid import UUID
+    from capability import ab_test_engine
+
+    test = ab_test_engine._active_tests.get(UUID(test_id))
+
+    if not test:
+        return {
+            "status": "error",
+            "message": "A/B test not found"
+        }
+
+    return {
+        "status": "ok",
+        "test": test.to_dict()
+    }
+
+
+@app.post("/capability/ab-testing/complete/{test_id}")
+async def complete_ab_test(test_id: str):
+    """
+    Manually complete an A/B test and determine winner.
+
+    This will:
+    1. Stop routing traffic to both versions
+    2. Calculate winner based on metrics
+    3. Return decision (PROMOTE, KEEP_CURRENT, or INCONCLUSIVE)
+    """
+    from uuid import UUID
+    from capability import ab_test_engine
+
+    test = ab_test_engine._active_tests.get(UUID(test_id))
+
+    if not test:
+        return {
+            "status": "error",
+            "message": "A/B test not found"
+        }
+
+    # Complete test and get decision
+    decision = await ab_test_engine.complete_test(test)
+
+    return {
+        "status": "ok",
+        "message": "A/B test completed",
+        "test_id": test_id,
+        "decision": decision.value,
+        "reason": test.decision_reason
+    }
+
+
+@app.post("/capability/ab-testing/record")
+async def record_ab_test_execution(
+    test_id: str,
+    version_id: str,
+    success: bool,
+    latency_ms: float,
+    confidence: float,
+    artifact_count: int = 0
+):
+    """
+    Record an execution result for A/B test.
+
+    This should be called after each goal execution.
+    """
+    from uuid import UUID
+    from capability import ab_test_engine
+
+    await ab_test_engine.record_execution(
+        test_id=UUID(test_id),
+        version_id=UUID(version_id),
+        success=success,
+        latency_ms=latency_ms,
+        confidence=confidence,
+        artifact_count=artifact_count
+    )
+
+    return {
+        "status": "ok",
+        "message": "Execution recorded"
+    }
+
 
 
