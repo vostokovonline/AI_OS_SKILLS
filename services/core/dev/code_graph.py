@@ -29,6 +29,9 @@ class CodeNode:
     imports: List[str] = field(default_factory=list)
     called_by: List[str] = field(default_factory=list)
     calls: List[str] = field(default_factory=list)
+    inherits: List[str] = field(default_factory=list)  # NEW: inheritance
+    params: List[str] = field(default_factory=list)   # NEW: function parameters
+    returns: str = ""                                  # NEW: return type
 
 
 @dataclass  
@@ -92,13 +95,16 @@ class CodeGraph:
         module_name = self._get_module_name(file_path)
         self.modules[module_name] = str(file_path)
         
+        # Build call graph within this file
+        local_calls = self._extract_calls(tree, module_name)
+        
         # Process classes and functions
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef):
-                self._add_class_node(node, module_name, file_path, content)
+                self._add_class_node(node, module_name, file_path, content, local_calls)
             elif isinstance(node, ast.FunctionDef):
                 if not self._is_method(node):  # Skip methods (processed with class)
-                    self._add_function_node(node, module_name, file_path, content)
+                    self._add_function_node(node, module_name, file_path, content, local_calls)
         
         # Process imports
         for node in ast.walk(tree):
@@ -108,6 +114,46 @@ class CodeGraph:
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
                     self._add_import(module_name, node.module)
+    
+    def _extract_calls(self, tree: ast.AST, module: str) -> Dict[str, List[str]]:
+        """Extract all function/method calls from AST"""
+        calls = {}
+        
+        class CallExtractor(ast.NodeVisitor):
+            def __init__(self):
+                self.current_function = None
+                self.current_class = None
+                
+            def visit_ClassDef(self, node):
+                old_class = self.current_class
+                self.current_class = node.name
+                self.generic_visit(node)
+                self.current_class = old_class
+                
+            def visit_FunctionDef(self, node):
+                old_func = self.current_function
+                if self.current_class:
+                    func_id = f"{module}.{self.current_class}.{node.name}"
+                else:
+                    func_id = f"{module}.{node.name}"
+                self.current_function = func_id
+                calls[func_id] = []
+                self.generic_visit(node)
+                self.current_function = old_func
+                
+            def visit_Call(self, node):
+                if self.current_function:
+                    # Get function name being called
+                    if isinstance(node.func, ast.Name):
+                        calls[self.current_function].append(node.func.id)
+                    elif isinstance(node.func, ast.Attribute):
+                        # Handle method calls like obj.method()
+                        calls[self.current_function].append(node.func.attr)
+                self.generic_visit(node)
+        
+        extractor = CallExtractor()
+        extractor.visit(tree)
+        return calls
     
     def _get_module_name(self, file_path: Path) -> str:
         """Получить имя модуля из пути к файлу"""
@@ -121,9 +167,10 @@ class CodeGraph:
     
     def _is_method(self, node: ast.FunctionDef) -> bool:
         """Проверить является ли функция методом класса"""
-        return isinstance(node.parent, ast.ClassDef)
+        # Simplified check - in real AST we'd use parent
+        return False  # Will be handled by class processing
     
-    def _add_class_node(self, node: ast.ClassDef, module: str, file_path: Path, content: str) -> None:
+    def _add_class_node(self, node: ast.ClassDef, module: str, file_path: Path, content: str, local_calls: Dict[str, List[str]]) -> None:
         """Добавить узел класса"""
         node_id = f"{module}.{node.name}"
         
@@ -131,6 +178,9 @@ class CodeGraph:
         
         # Get decorators
         decorators = [d.id if isinstance(d, ast.Name) else ast.unparse(d) for d in node.decorator_list]
+        
+        # Get inheritance
+        inherits = [b.id if isinstance(b, ast.Name) else ast.unparse(b) for b in node.bases]
         
         self.nodes[node_id] = CodeNode(
             name=node.name,
@@ -140,16 +190,60 @@ class CodeGraph:
             line_end=node.end_lineno or 0,
             docstring=docstring,
             decorators=decorators,
-            imports=[]
+            imports=[],
+            inherits=inherits
         )
+        
+        # Process methods
+        for item in node.body:
+            if isinstance(item, ast.FunctionDef):
+                self._add_method_node(item, node_id, module, file_path, content, local_calls)
     
-    def _add_function_node(self, node: ast.FunctionDef, module: str, file_path: Path, content: str) -> None:
+    def _add_method_node(self, node: ast.FunctionDef, class_id: str, module: str, file_path: Path, content: str, local_calls: Dict[str, List[str]]) -> None:
+        """Добавить узел метода"""
+        node_id = f"{class_id}.{node.name}"
+        full_id = f"{module}.{node.name}"
+        
+        docstring = ast.get_docstring(node) or ""
+        decorators = [d.id if isinstance(d, ast.Name) else ast.unparse(d) for d in node.decorator_list]
+        
+        # Get parameters
+        params = [a.arg for a in node.args.args] if node.args else []
+        
+        # Get calls from local_calls
+        calls = local_calls.get(full_id, [])
+        
+        self.nodes[node_id] = CodeNode(
+            name=node.name,
+            type="method",
+            file_path=str(file_path),
+            line_start=node.lineno or 0,
+            line_end=node.end_lineno or 0,
+            docstring=docstring,
+            decorators=decorators,
+            imports=[],
+            calls=calls,
+            params=params
+        )
+        
+        # Add call edges
+        for call in calls:
+            self.edges.append(CodeEdge(
+                from_node=node_id,
+                to_node=call,
+                relation="calls"
+            ))
+    
+    def _add_function_node(self, node: ast.FunctionDef, module: str, file_path: Path, content: str, local_calls: Dict[str, List[str]]) -> None:
         """Добавить узел функции"""
         node_id = f"{module}.{node.name}"
         
         docstring = ast.get_docstring(node) or ""
-        
         decorators = [d.id if isinstance(d, ast.Name) else ast.unparse(d) for d in node.decorator_list]
+        params = [a.arg for a in node.args.args] if node.args else []
+        
+        # Get calls
+        calls = local_calls.get(node_id, [])
         
         self.nodes[node_id] = CodeNode(
             name=node.name,
@@ -159,8 +253,18 @@ class CodeGraph:
             line_end=node.end_lineno or 0,
             docstring=docstring,
             decorators=decorators,
-            imports=[]
+            imports=[],
+            calls=calls,
+            params=params
         )
+        
+        # Add call edges
+        for call in calls:
+            self.edges.append(CodeEdge(
+                from_node=node_id,
+                to_node=call,
+                relation="calls"
+            ))
     
     def _add_import(self, from_module: str, import_name: str) -> None:
         """Добавить связь импорта"""
