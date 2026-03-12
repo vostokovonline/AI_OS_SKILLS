@@ -117,6 +117,10 @@ class TraceStore:
     
     async def append_event(self, goal_id: str, event_type: str, data: dict) -> None:
         """Добавить событие к trace"""
+        # Auto-initialize if not initialized
+        if not self._initialized:
+            await self.initialize()
+            
         async with self._lock:
             if goal_id not in self._traces:
                 self._traces[goal_id] = {
@@ -152,6 +156,15 @@ class TraceStore:
             if not trace:
                 return
             
+            # Convert string dates to datetime
+            started_at = trace.get("started_at")
+            if isinstance(started_at, str):
+                started_at = datetime.fromisoformat(started_at)
+                
+            completed_at = trace.get("completed_at")
+            if completed_at and isinstance(completed_at, str):
+                completed_at = datetime.fromisoformat(completed_at)
+            
             async with AsyncSessionLocal() as session:
                 await session.execute(
                     text("""
@@ -172,8 +185,8 @@ class TraceStore:
                         "skill_name": trace.get("skill_name", ""),
                         "status": trace.get("status", ""),
                         "confidence": trace.get("confidence", 0.0),
-                        "started_at": trace.get("started_at"),
-                        "completed_at": trace.get("completed_at"),
+                        "started_at": started_at,
+                        "completed_at": completed_at,
                         "events": json.dumps(trace.get("events", []))
                     }
                 )
@@ -183,6 +196,10 @@ class TraceStore:
     
     async def update_trace_status(self, goal_id: str, status: str, confidence: float) -> None:
         """Обновить статус trace после завершения"""
+        # Auto-initialize if not initialized
+        if not self._initialized:
+            await self.initialize()
+            
         async with self._lock:
             if goal_id in self._traces:
                 self._traces[goal_id]["status"] = status

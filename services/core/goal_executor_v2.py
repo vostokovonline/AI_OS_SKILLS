@@ -286,20 +286,6 @@ class GoalExecutorV2:
         # =================================================================
         logger.info("execution_phase_1_read", goal_id=goal_id[:8])
 
-        # Emit GoalExecutionStarted event
-        try:
-            from application.events.execution_events import GoalExecutionStarted
-            event_bus = get_event_bus()
-            await event_bus.publish(GoalExecutionStarted(
-                goal_id=UUID(goal_id),
-                goal_title=goal.title if hasattr(goal, 'title') else "unknown",
-                goal_type=goal.goal_type if hasattr(goal, 'goal_type') else "",
-                is_atomic=goal.is_atomic if hasattr(goal, 'is_atomic') else True,
-                started_at=datetime.utcnow()
-            ))
-        except Exception as e:
-            logger.warning(f"Failed to emit GoalExecutionStarted: {e}")
-
         # Use caller's transaction
         goal = await self._repo.get(uow.session, UUID(goal_id))
         if not goal:
@@ -817,6 +803,39 @@ class GoalExecutorV2:
 
             scored_skills.append((score, skill, matched_caps, missed_caps))
 
+        # DECISION TRACE: Emit SkillCandidatesGenerated event
+        from application.events.bus import get_event_bus
+        from application.events.decision_events import SkillCandidatesGenerated
+        event_bus = get_event_bus()
+        
+        goal_id = goal_snapshot.get("id", "")
+
+        candidates_data = []
+        for score, skill, matched, missed in scored_skills:
+            skill_name = getattr(skill, 'name', skill.__class__.__name__)
+            skill_id = getattr(skill, 'id', skill_name)
+            candidates_data.append({
+                "skill_id": skill_id,
+                "score": score,
+                "capabilities": getattr(skill, 'capabilities', []),
+                "matched_capabilities": matched,
+                "missed_capabilities": missed
+            })
+
+        await event_bus.publish(SkillCandidatesGenerated(
+            goal_id=UUID(goal_id),
+            requirements={
+                "required_capabilities": required_capabilities,
+                "required_artifacts": required_artifacts
+            },
+            candidates=candidates_data
+        ))
+        logger.info(
+            "skill_candidates_generated",
+            goal_id=goal_id,
+            candidates_count=len(scored_skills)
+        )
+
         if not scored_skills:
             return EchoSkill()
 
@@ -892,21 +911,36 @@ class GoalExecutorV2:
             if missed:
                 self._try_mcp_generation(missed, requirements, goal_snapshot)
 
-        # Emit SkillSelected event
+        # Emit SkillSelected event (Decision Trace v1.5)
         try:
             from datetime import datetime
-            from application.events.execution_events import SkillSelected
+            from application.events.decision_events import SkillSelected
             goal_id = goal_snapshot.get("id", "")
             if goal_id and skill_name:
                 event_bus = get_event_bus()
+
+                # Extract alternative skills (what was NOT chosen)
+                alternative_skills = []
+                for score, skill, _, _ in scored_skills[1:]:  # Skip the chosen one
+                    alt_name = getattr(skill, 'name', skill.__class__.__name__)
+                    alternative_skills.append(alt_name)
+
                 await event_bus.publish(SkillSelected(
                     goal_id=UUID(goal_id),
                     skill_id=getattr(best_skill, 'id', skill_name),
-                    skill_name=skill_name,
-                    score=best_score,
-                    attempt=1,
-                    selected_at=datetime.utcnow()
+                    candidates_count=len(scored_skills),
+                    rejected_count=len(scored_skills) - 1,
+                    selection_reason="capability_match" if best_score >= 0 else "fallback",
+                    confidence=min(1.0, max(0.0, best_score / 20.0)),  # Normalize score to 0-1
+                    alternative_skills=alternative_skills
                 ))
+                logger.info(
+                    "decision_skill_selected",
+                    goal_id=goal_id[:8],
+                    skill=skill_name,
+                    candidates_count=len(scored_skills),
+                    confidence=min(1.0, max(0.0, best_score / 20.0))
+                )
         except Exception as e:
             logger.warning(f"Failed to emit SkillSelected: {e}")
 
@@ -1196,6 +1230,21 @@ class GoalExecutorV2:
         execution_engine = getattr(goal, '_execution_engine', None)
 
         try:
+            # Create goal_snapshot for skill selection
+            goal_snapshot = {
+                "id": str(goal.id),
+                "title": goal.title,
+                "description": goal.description,
+                "goal_type": goal.goal_type,
+                "is_atomic": goal.is_atomic,
+                "completion_criteria": goal.completion_criteria,
+                "success_definition": goal.success_definition,
+                "domains": goal.domains or [],
+                "constraints": goal.constraints or {},
+                "progress": goal.progress or 0.0,
+                "execution_mode": goal.completion_mode or "auto"
+            }
+            
             # Step 1: Parse requirements
             requirements = self._parse_requirements(goal)
             logger.debug("goal_requirements", requirements=requirements)
@@ -1208,7 +1257,7 @@ class GoalExecutorV2:
             # Step 2: Select skill (PHASE 1: with performance metrics)
             skill = await self._select_skill_with_performance(
                 requirements,
-                goal,
+                goal_snapshot,
                 uow.session
             )
             if not skill:
@@ -1580,6 +1629,29 @@ class GoalExecutorV2:
                 duration_ms=execution_rec.duration_ms,
                 success=True
             )
+
+            # Write trace directly to trace store (bypassing event bus for cross-process)
+            try:
+                from trace_store import get_trace_store
+                trace_store = get_trace_store()
+                await trace_store.append_event(
+                    goal_id=str(goal.id),
+                    event_type="SkillSelected",
+                    data={
+                        "goal_title": goal.title,
+                        "goal_type": goal.goal_type or "",
+                        "skill_name": skill_id_normalized,
+                        "success": True
+                    }
+                )
+                await trace_store.update_trace_status(
+                    goal_id=str(goal.id),
+                    status="completed",
+                    confidence=evaluation_result.confidence if evaluation_result else 0.5
+                )
+                logger.info("trace_written_to_store", goal_id=str(goal.id)[:8])
+            except Exception as e:
+                logger.warning("trace_write_failed", error=str(e))
 
             # =================================================================
             # RECORD EXPERIENCE - THIS IS THE LEARNING MOMENT
