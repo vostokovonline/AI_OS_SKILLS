@@ -197,48 +197,88 @@ class TraceMiningEngine:
         return strategies
     
     async def build_cognitive_cache(self) -> Dict[str, Dict[str, Any]]:
-        """Построить Cognitive Cache - быстрые решения без LLM"""
-        # Get all traces
+        """Построить Cognitive Cache - быстрые решения без LLM по goal_type"""
         traces = await self.trace_store.get_all_traces(limit=500)
         
-        # Analyze skill success rates
-        success_rates = await self.analyze_skill_success_rate(traces)
+        goal_type_skills: Dict[str, Dict[str, Dict[str, Any]]] = {}
         
-        # Build cache - best skill for each goal type
+        for trace in traces:
+            goal_type = trace.get("goal_type", "")
+            if not goal_type:
+                continue
+            
+            skill_name = trace.get("skill_name", "")
+            status = trace.get("status", "")
+            
+            if goal_type not in goal_type_skills:
+                goal_type_skills[goal_type] = {}
+            
+            if skill_name:
+                if skill_name not in goal_type_skills[goal_type]:
+                    goal_type_skills[goal_type][skill_name] = {"success": 0, "total": 0}
+                
+                goal_type_skills[goal_type][skill_name]["total"] += 1
+                if status == "completed":
+                    goal_type_skills[goal_type][skill_name]["success"] += 1
+        
         cache = {}
-        
-        for skill, stats in success_rates.items():
-            if stats["total"] >= 3:  # At least 3 uses
-                cache[skill] = {
-                    "skill": skill,
-                    "confidence": stats["success_rate"],
-                    "usage_count": stats["total"]
+        for goal_type, skills in goal_type_skills.items():
+            best_skill = None
+            best_rate = 0.0
+            best_count = 0
+            
+            for skill, stats in skills.items():
+                rate = stats["success"] / stats["total"] if stats["total"] > 0 else 0.0
+                if stats["total"] >= 1 and (rate > best_rate or (rate == best_rate and stats["total"] > best_count)):
+                    best_rate = rate
+                    best_count = stats["total"]
+                    best_skill = skill
+            
+            if best_skill:
+                cache[goal_type] = {
+                    "skill": best_skill,
+                    "confidence": best_rate,
+                    "usage_count": best_count
                 }
         
         self._cognitive_cache = cache
         return cache
     
-    async def get_best_skill(self, goal_title: str) -> Optional[str]:
-        """Получить лучший skill для goal без LLM"""
-        # Build cache if empty
+    async def get_best_skill(self, goal_title: str = "", goal_type: str = "") -> Optional[str]:
+        """Получить лучший skill для goal без LLM
+        
+        Args:
+            goal_title: Title of the goal (for fallback keyword matching)
+            goal_type: Type of the goal (achievable, continuous, directional, exploratory, meta)
+        """
         if not self._cognitive_cache:
             await self.build_cognitive_cache()
         
-        # Try to find in cache first
-        if self._cognitive_cache:
-            # Simple keyword matching
+        if not self._cognitive_cache:
+            return None
+        
+        if goal_type and goal_type in self._cognitive_cache:
+            return self._cognitive_cache[goal_type]["skill"]
+        
+        if goal_title:
             goal_lower = goal_title.lower()
             
-            for skill, info in self._cognitive_cache.items():
-                if skill.lower() in goal_lower or goal_lower in skill.lower():
-                    return skill
+            for cached_type, info in self._cognitive_cache.items():
+                if cached_type.lower() in goal_lower or goal_lower in cached_type.lower():
+                    return info["skill"]
             
-            # Return highest confidence skill
             best = max(self._cognitive_cache.items(), 
                       key=lambda x: (x[1]["confidence"], x[1]["usage_count"]))
-            return best[0]
+            return best[1]["skill"]
         
         return None
+    
+    async def get_best_skill_by_type(self, goal_type: str) -> Optional[Dict[str, Any]]:
+        """Получить лучший skill для конкретного goal_type"""
+        if not self._cognitive_cache:
+            await self.build_cognitive_cache()
+        
+        return self._cognitive_cache.get(goal_type)
     
     async def compile_strategies(self) -> Dict[str, List[str]]:
         """Скомпилировать стратегии для быстрого выполнения"""

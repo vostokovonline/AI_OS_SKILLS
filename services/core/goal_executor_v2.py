@@ -293,6 +293,7 @@ class GoalExecutorV2:
             await event_bus.publish(GoalExecutionStarted(
                 goal_id=UUID(goal_id),
                 goal_title=goal.title if hasattr(goal, 'title') else "unknown",
+                goal_type=goal.goal_type if hasattr(goal, 'goal_type') else "",
                 is_atomic=goal.is_atomic if hasattr(goal, 'is_atomic') else True,
                 started_at=datetime.utcnow()
             ))
@@ -312,6 +313,7 @@ class GoalExecutorV2:
             await event_bus.publish(GoalExecutionStarted(
                 goal_id=UUID(goal_id),
                 goal_title=goal.title,
+                goal_type=goal.goal_type or "",
                 is_atomic=goal.is_atomic,
                 started_at=datetime.utcnow()
             ))
@@ -702,25 +704,41 @@ class GoalExecutorV2:
         required_capabilities = requirements.get("capabilities", [])
         required_artifacts = requirements.get("artifacts", [])
         
-        # Try Cognitive Cache first - skip LLM scoring if we have cached best skill
+        goal_title = goal_snapshot.get("title", "")
+        goal_type = goal_snapshot.get("goal_type", "")
+        
+        cached_skill = None
+        cache_source = ""
+        
         try:
             from trace_mining_engine import get_mining_engine
             from trace_store import get_trace_store
-            goal_title = goal_snapshot.get("title", "")
             
             mining_engine = get_mining_engine(get_trace_store())
-            cached_skill = await mining_engine.get_best_skill(goal_title)
+            
+            if goal_type:
+                cached_info = await mining_engine.get_best_skill_by_type(goal_type)
+                if cached_info:
+                    cached_skill = cached_info.get("skill")
+                    cache_source = f"cognitive_cache_goal_type:{goal_type}"
+            
+            if not cached_skill and goal_title:
+                cached_skill = await mining_engine.get_best_skill(goal_title=goal_title, goal_type="")
+                cache_source = "cognitive_cache_keyword"
             
             if cached_skill:
-                # Find skill object by name
                 all_skills = skill_registry.list()
                 for skill in all_skills:
                     skill_name = getattr(skill, 'name', skill.__class__.__name__)
                     if cached_skill.lower() in skill_name.lower():
-                        logger.info("skill_selection_cognitive_cache", goal_id=goal_snapshot.get("id", "")[:8], skill=cached_skill, source="cognitive_cache")
+                        logger.info("skill_selection_cognitive_cache", 
+                                  goal_id=str(goal_snapshot.get("id", ""))[:8], 
+                                  skill=cached_skill, 
+                                  source=cache_source,
+                                  goal_type=goal_type)
                         return skill
         except Exception as e:
-            logger.info(f"Cognitive cache lookup error: {e}")
+            logger.warning("cognitive_cache_lookup_error", error=str(e))
 
         all_skills = skill_registry.list()
 

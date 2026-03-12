@@ -66,6 +66,7 @@ class GoalExecutionStarted:
     """Immutable fact: Goal execution started."""
     goal_id: UUID
     goal_title: str
+    goal_type: str  # NEW: for cognitive cache by goal_type
     is_atomic: bool
     started_at: datetime
 

@@ -21,6 +21,7 @@ class TraceCollector:
             event_type="GoalExecutionStarted",
             data={
                 "goal_title": getattr(event, "goal_title", "unknown"),
+                "goal_type": getattr(event, "goal_type", ""),
                 "is_atomic": getattr(event, "is_atomic", True)
             }
         )
