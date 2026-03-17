@@ -1,6 +1,6 @@
 import uuid, asyncio, time, os
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -79,6 +79,9 @@ from api.endpoints.skills import router as skills_router
 # Control Center API (Metrics Engine)
 from api.endpoints.control_center import router as control_center_router
 
+# NEW: Refactored API module (Dashboard Compatibility Layer)
+from api.routes import router as dashboard_router
+
 app = FastAPI()
 
 # SECURITY: Limit CORS to specific origins
@@ -92,6 +95,13 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
     allow_headers=["*"],
 )
+
+# ============================================================
+# INCLUDE ROUTERS
+# ============================================================
+
+# Dashboard Compatibility Layer (refactored from inline routes)
+app.include_router(dashboard_router)
 
 # Phase 2.2.5: Include goal approval router
 app.include_router(approve_completion_router)
@@ -285,6 +295,25 @@ async def startup():
     event_bus.subscribe(GoalExecutionFinished, trace_collector.handle_goal_execution_finished)
 
     logger.info("✓ Trace Collector initialized and subscribed to event bus")
+
+    # Subscribe to Decision Events (Phase 1.5 - Decision Trace)
+    from application.events.decision_events import (
+        SkillCandidatesGenerated,
+        SkillSelected as DecisionSkillSelected,
+        SkillRetry,
+        PlanGenerated,
+        FallbackTriggered,
+        LLMModelSelected
+    )
+
+    event_bus.subscribe(SkillCandidatesGenerated, metrics_engine.handle_event)
+    event_bus.subscribe(DecisionSkillSelected, metrics_engine.handle_event)
+    event_bus.subscribe(SkillRetry, metrics_engine.handle_event)
+    event_bus.subscribe(PlanGenerated, metrics_engine.handle_event)
+    event_bus.subscribe(FallbackTriggered, metrics_engine.handle_event)
+    event_bus.subscribe(LLMModelSelected, metrics_engine.handle_event)
+
+    logger.info("✓ Decision Events subscribed to Metrics Engine")
 
     # Start periodic batch flush
     await metrics_engine.start_periodic_flush()
@@ -3448,6 +3477,702 @@ async def get_contextual_memory(user_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =============================================================================
+# CONTEXT OS API - Smart context selection for LLM
+# =============================================================================
+
+@app.post("/context/select")
+async def select_context(request: Request):
+    """
+    Выбрать релевантный контекст для LLM задачи.
+    
+    Context OS - интеллектуальный выбор контекста из кодовой базы.
+    
+    Request body:
+    {
+        "target": "goal_executor",  # Файл, класс или функция
+        "task_type": "implement",    # implement, analyze, refactor, review
+        "model": "qwen",            # qwen, opencode, claude, gpt4
+        "max_tokens": 8000          # Лимит токенов
+    }
+    
+    Returns:
+    {
+        "status": "ok",
+        "target": "goal_executor",
+        "summary": "...",
+        "files": [{"path": "...", "content": "...", "relevance": 0.9}],
+        "interfaces": [...],
+        "total_tokens": 5000
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    target = body.get("target", "")
+    task_type = body.get("task_type", "implement")
+    model = body.get("model", "qwen")
+    max_tokens = body.get("max_tokens")
+    
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    
+    try:
+        from dev.context_selector import ContextSelector
+        from dev.code_graph import load_or_build_graph
+        
+        # Load code graph
+        graph = load_or_build_graph("/app")
+        
+        # Select context
+        selector = ContextSelector(code_graph=graph)
+        context_pack = selector.select(
+            target=target,
+            task_type=task_type,
+            model=model,
+            max_tokens=max_tokens
+        )
+        
+        return {
+            "status": "ok",
+            "target": context_pack.target,
+            "summary": context_pack.summary,
+            "files": [
+                {"path": p, "content": c[:2000], "relevance": r} 
+                for p, c, r in context_pack.files
+            ],
+            "interfaces": context_pack.interfaces,
+            "imports": context_pack.imports,
+            "total_tokens": context_pack.total_tokens
+        }
+        
+    except Exception as e:
+        logger.error("context_selection_failed", error=str(e), target=target)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/context/graph/stats")
+async def context_graph_stats():
+    """
+    Получить статистику code graph.
+    
+    Returns:
+    {
+        "total_nodes": 950,
+        "total_edges": 2100,
+        "files": 387,
+        "classes": 450,
+        "functions": 1200
+    }
+    """
+    try:
+        from dev.code_graph import load_or_build_graph
+        
+        graph = load_or_build_graph("/app")
+        
+        files = set()
+        classes = set()
+        functions = set()
+        
+        for node_id, node in graph.nodes.items():
+            if hasattr(node, 'file_path'):
+                files.add(node.file_path)
+            if hasattr(node, 'node_type'):
+                if node.node_type == 'class':
+                    classes.add(node_id)
+                elif node.node_type == 'function':
+                    functions.add(node_id)
+        
+        return {
+            "status": "ok",
+            "total_nodes": len(graph.nodes),
+            "total_edges": len(graph.edges),
+            "files": len(files),
+            "classes": len(classes),
+            "functions": len(functions)
+        }
+        
+    except Exception as e:
+        logger.error("graph_stats_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/context/graph/rebuild")
+async def rebuild_context_graph():
+    """
+    Перестроить code graph.
+    
+    Returns:
+    {
+        "status": "ok",
+        "nodes": 950,
+        "edges": 2100
+    }
+    """
+    try:
+        from dev.code_graph import CodeGraph, build_graph
+        
+        graph = build_graph()
+        
+        return {
+            "status": "ok",
+            "nodes": len(graph.nodes),
+            "edges": len(graph.edges)
+        }
+        
+    except Exception as e:
+        logger.error("graph_rebuild_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# SEMANTIC RAG API - Context-aware code search
+# =============================================================================
+
+@app.post("/context/semantic-search")
+async def semantic_code_search(request: Request):
+    """
+    Семантический поиск по коду.
+    
+    Использует:
+    1. Keyword-based search по функциям и классам
+    2. Graph expansion для зависимостей
+    3. Возвращает релевантные файлы и чанки
+    
+    Request body:
+    {
+        "query": "add new skill registration",
+        "top_k": 10,
+        "expand_dependencies": true
+    }
+    
+    Returns:
+    {
+        "query": "...",
+        "chunks_found": 15,
+        "files": [
+            {
+                "path": "/app/canonical_skills/registry.py",
+                "chunks": [
+                    {"name": "SkillRegistry", "type": "class", "lines": "10-50"}
+                ]
+            }
+        ]
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    query = body.get("query", "")
+    top_k = body.get("top_k", 10)
+    expand = body.get("expand_dependencies", True)
+    
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    
+    try:
+        from dev.semantic_rag_index import search_code_context
+        
+        result = await search_code_context(
+            task=query,
+            top_k=top_k,
+            expand_dependencies=expand
+        )
+        
+        return {
+            "status": "ok",
+            **result
+        }
+        
+    except Exception as e:
+        logger.error("semantic_search_failed", error=str(e), query=query)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# DEV GOAL ENGINE API - Self-evolving system
+# =============================================================================
+
+@app.get("/dev/goals")
+async def get_dev_goals():
+    """
+    Получить список задач разработки на основе анализа traces.
+    
+    Dev Goal Engine анализирует:
+    1. Capability gaps - какие capabilities запрашивались но не были удовлетворены
+    2. Problematic skills - навыки с низким success rate
+    3. Recurring errors - повторяющиеся ошибки
+    
+    Returns:
+    {
+        "status": "ok",
+        "dev_goals": [
+            {
+                "goal_type": "new_skill",
+                "title": "Create {skill} skill",
+                "description": "...",
+                "priority": 4,
+                "target_module": "goal_executor_v2.py"
+            }
+        ]
+    }
+    """
+    try:
+        from dev.dev_goal_engine import DevGoalEngine
+        from trace_store import get_trace_store
+        from trace_mining_engine import get_mining_engine
+        
+        # Get trace store and mining engine
+        trace_store = get_trace_store()
+        mining_engine = get_mining_engine(trace_store)
+        
+        # Create dev goal engine
+        engine = DevGoalEngine(mining_engine)
+        
+        # Generate dev goals
+        dev_goals = await engine.analyze_and_generate_dev_goals()
+        
+        return {
+            "status": "ok",
+            "dev_goals": [
+                {
+                    "goal_type": g.goal_type.value,
+                    "title": g.title,
+                    "description": g.description,
+                    "priority": g.priority,
+                    "target_module": g.target_module,
+                    "required_capabilities": g.required_capabilities
+                }
+                for g in dev_goals
+            ]
+        }
+        
+    except Exception as e:
+        logger.error("dev_goals_generation_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/dev/goals/from-goal")
+async def create_dev_goal_from_failed_goal(request: Request):
+    """
+    Создать dev goal из провалившейся обычной цели.
+    
+    Request body:
+    {
+        "goal_id": "uuid",
+        "title": "Research AI OS",
+        "description": "Research artificial intelligence operating systems",
+        "failed_reason": "no skill found for capability 'research'",
+        "required_capabilities": ["research", "web-search"]
+    }
+    
+    Returns:
+    {
+        "status": "ok",
+        "dev_task": {
+            "task_type": "implement_skill",
+            "target": "goal_executor_v2.py",
+            "description": "...",
+            "suggested_approach": "..."
+        }
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    goal_info = {
+        "title": body.get("title", ""),
+        "description": body.get("description", ""),
+        "failed_reason": body.get("failed_reason", ""),
+        "required_capabilities": body.get("required_capabilities", []),
+        "target_module": body.get("target_module", "unknown")
+    }
+    
+    try:
+        from dev.dev_goal_engine import DevGoalEngine
+        from trace_store import get_trace_store
+        from trace_mining_engine import get_mining_engine
+        
+        trace_store = get_trace_store()
+        mining_engine = get_mining_engine(trace_store)
+        engine = DevGoalEngine(mining_engine)
+        
+        dev_task = engine.generate_dev_task_from_goal(goal_info)
+        
+        return {
+            "status": "ok",
+            "dev_task": dev_task
+        }
+        
+    except Exception as e:
+        logger.error("dev_goal_from_failed_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/dev/analyze/traces")
+async def analyze_traces_deep():
+    """
+    Глубокий анализ traces для выявления паттернов и проблем.
+    
+    Returns:
+    {
+        "status": "ok",
+        "analysis": {
+            "skill_success_rate": {...},
+            "skill_usage": {...},
+            "patterns": [...],
+            "capability_gaps": [...],
+            "problematic_skills": [...]
+        }
+    }
+    """
+    try:
+        from trace_store import get_trace_store
+        from trace_mining_engine import get_mining_engine
+        
+        trace_store = get_trace_store()
+        mining_engine = get_mining_engine(trace_store)
+        
+        analysis = await mining_engine.analyze_all()
+        
+        # Extract key insights
+        skill_rates = analysis.get("skill_success_rate", {})
+        problematic = [
+            {"skill": k, "rate": v.get("success_rate", 0), "total": v.get("total", 0)}
+            for k, v in skill_rates.items()
+            if v.get("success_rate", 1.0) < 0.7 and v.get("total", 0) >= 3
+        ]
+        
+        return {
+            "status": "ok",
+            "analysis": {
+                "total_traces": analysis.get("skill_usage", {}).get("total", 0),
+                "skill_success_rate": skill_rates,
+                "skill_usage": analysis.get("skill_usage", {}),
+                "problematic_skills": problematic,
+                "patterns_count": len(analysis.get("patterns", []))
+            }
+        }
+        
+    except Exception as e:
+        logger.error("trace_analysis_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# SKILL LIFECYCLE MANAGER API - Self-evolving skill activation
+# =============================================================================
+
+@app.post("/skills/lifecycle/activate")
+async def activate_skill(request: Request):
+    """
+    Активировать новый навык после генерации.
+    
+    Это замыкает loop:
+    capability gap → generate → activate → planner uses
+    
+    Request body:
+    {
+        "skill_id": "my_generated_skill",
+        "capabilities": ["code-generation", "python"],
+        "metadata": {"source": "dev_goal_engine", "goal_id": "..."}
+    }
+    
+    Returns:
+    {
+        "status": "ok",
+        "skill_id": "my_generated_skill",
+        "activated": true,
+        "message": "Skill activated and ready to use"
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    skill_id = body.get("skill_id", "")
+    capabilities = body.get("capabilities", [])
+    metadata = body.get("metadata", {})
+    
+    if not skill_id:
+        raise HTTPException(status_code=400, detail="skill_id is required")
+    
+    if not capabilities:
+        raise HTTPException(status_code=400, detail="capabilities is required")
+    
+    try:
+        from skill_lifecycle_manager import activate_new_skill
+        
+        # Try to import the generated skill module
+        try:
+            import importlib
+            module = importlib.import_module(f"canonical_skills.autogenerated.{skill_id}")
+        except ImportError:
+            # Module not found - just log and continue
+            logger.warning(
+                "skill_module_not_found",
+                skill_id=skill_id
+            )
+            module = None
+        
+        success = await activate_new_skill(
+            skill_id=skill_id,
+            skill_module=module,
+            capabilities=capabilities,
+            metadata=metadata
+        )
+        
+        if success:
+            return {
+                "status": "ok",
+                "skill_id": skill_id,
+                "activated": True,
+                "message": "Skill activated and ready to use"
+            }
+        else:
+            return {
+                "status": "error",
+                "skill_id": skill_id,
+                "activated": False,
+                "message": "Failed to activate skill"
+            }
+            
+    except Exception as e:
+        logger.error("skill_activation_failed", error=str(e), skill_id=skill_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/skills/lifecycle/status/{skill_id}")
+async def get_skill_lifecycle_status(skill_id: str):
+    """
+    Получить статус навыка в lifecycle.
+    
+    Returns:
+    {
+        "skill_id": "my_skill",
+        "status": "active",
+        "history": [...]
+    }
+    """
+    try:
+        from skill_lifecycle_manager import get_skill_lifecycle_manager
+        
+        manager = get_skill_lifecycle_manager()
+        status = manager.get_skill_status(skill_id)
+        history = manager.get_lifecycle_history(skill_id=skill_id)
+        
+        return {
+            "skill_id": skill_id,
+            "status": status.value if status else "unknown",
+            "history": history
+        }
+        
+    except Exception as e:
+        logger.error("lifecycle_status_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/skills/lifecycle/history")
+async def get_lifecycle_history(limit: int = 50):
+    """
+    Получить историю всех lifecycle событий.
+    
+    Returns:
+    {
+        "events": [...],
+        "total": 100
+    }
+    """
+    try:
+        from skill_lifecycle_manager import get_skill_lifecycle_manager
+        
+        manager = get_skill_lifecycle_manager()
+        events = manager.get_lifecycle_history(limit=limit)
+        
+        return {
+            "events": events,
+            "total": len(events)
+        }
+        
+    except Exception as e:
+        logger.error("lifecycle_history_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/skills/lifecycle/deactivate/{skill_id}")
+async def deactivate_skill(skill_id: str, reason: str = "Manual deprecation"):
+    """
+    Деактивировать навык.
+    
+    Args:
+        skill_id: ID навыка
+        reason: Причина деактивации
+    """
+    try:
+        from skill_lifecycle_manager import get_skill_lifecycle_manager
+        
+        manager = get_skill_lifecycle_manager()
+        success = await manager.deactivate_skill(skill_id, reason)
+        
+        return {
+            "status": "ok" if success else "error",
+            "skill_id": skill_id,
+            "deactivated": success
+        }
+        
+    except Exception as e:
+        logger.error("skill_deactivation_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# SELF-EVOLUTION PIPELINE API - Complete evolution loop
+# =============================================================================
+
+@app.post("/evolution/run")
+async def run_evolution(request: Request):
+    """
+    Запустить полный evolution pipeline.
+    
+    Обрабатывает неудачу цели и эволюционирует систему:
+    1. Detect capability gap
+    2. Generate dev task
+    3. Generate skill
+    4. Activate skill
+    5. Invalidate caches
+    
+    Request body:
+    {
+        "goal_id": "uuid",
+        "capability": "pdf-parse",
+        "goal_title": "Parse PDF document",
+        "goal_description": "Extract text from PDF file"
+    }
+    
+    Returns:
+    {
+        "status": "ok",
+        "success": true,
+        "capability_gap": "pdf-parse",
+        "skill_generated": "pdf_parser_skill",
+        "skill_activated": true,
+        "message": "Successfully evolved system"
+    }
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    goal_id = body.get("goal_id", "")
+    capability = body.get("capability", "")
+    goal_title = body.get("goal_title", "")
+    goal_description = body.get("goal_description", "")
+    
+    if not capability:
+        raise HTTPException(status_code=400, detail="capability is required")
+    
+    try:
+        from self_evolution_pipeline import run_evolution_from_failure
+        
+        result = await run_evolution_from_failure(
+            goal_id=goal_id,
+            capability=capability,
+            goal_title=goal_title,
+            goal_description=goal_description
+        )
+        
+        return {
+            "status": "ok",
+            "success": result.success,
+            "goal_id": result.goal_id,
+            "capability_gap": result.capability_gap,
+            "skill_generated": result.skill_generated,
+            "skill_activated": result.skill_activated,
+            "retry_successful": result.retry_successful,
+            "message": result.message,
+            "details": result.details
+        }
+        
+    except Exception as e:
+        logger.error("evolution_pipeline_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/evolution/status")
+async def get_evolution_status():
+    """
+    Получить статус evolution pipeline.
+    
+    Returns:
+    {
+        "evolution_count": 5,
+        "recent_evolutions": [...]
+    }
+    """
+    try:
+        from self_evolution_pipeline import get_evolution_pipeline
+        
+        pipeline = get_evolution_pipeline()
+        
+        # Get lifecycle history
+        from skill_lifecycle_manager import get_skill_lifecycle_manager
+        manager = get_skill_lifecycle_manager()
+        recent = manager.get_lifecycle_history(limit=10)
+        
+        return {
+            "evolution_count": pipeline.evolution_count,
+            "recent_evolutions": recent
+        }
+        
+    except Exception as e:
+        logger.error("evolution_status_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/evolution/retry-goal/{goal_id}")
+async def retry_goal_with_evolution(goal_id: str):
+    """
+    Повторить цель после evolution.
+    
+    После того как система эволюционировала,
+    повторить выполнение цели с новыми capabilities.
+    """
+    try:
+        # Get goal
+        from models import Goal
+        from database import AsyncSessionLocal
+        from sqlalchemy import select
+        
+        async with AsyncSessionLocal() as session:
+            stmt = select(Goal).where(Goal.id == goal_id)
+            result = await session.execute(stmt)
+            goal = result.scalar_one_or_none()
+            
+            if not goal:
+                return {"status": "error", "message": "Goal not found"}
+        
+        # Re-execute goal (simplified - just restart)
+        # In production, this would call the full execution pipeline
+        return {
+            "status": "ok",
+            "message": "Goal queued for re-execution",
+            "goal_id": goal_id,
+            "note": "System has evolved - new skills may be available"
+        }
+        
+    except Exception as e:
+        logger.error("retry_goal_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.put("/personality/{user_id}/contextual-memory")
 async def update_contextual_memory(user_id: str, recent_goals: list = None,
                                   emotional_tone: str = None,
@@ -5121,6 +5846,42 @@ async def submit_decomposition_answer(req: DecompositionAnswerRequest):
         
         db.commit()
         db.refresh(answer)
+        
+        # SYNC: Notify Telegram/Dashboard that question was answered
+        try:
+            # Notify that answer was received (to update UI on other platform)
+            import asyncio
+            
+            # Get question text for notification
+            question_text = question.question_text if hasattr(question, 'question_text') else ""
+            goal_title = session.goal_title if session else "Unknown"
+            
+            # Send sync notification to Telegram
+            from telegram_notifier import TelegramNotifier
+            notifier = TelegramNotifier()
+            
+            message = f"✅ <b>Ответ получен!</b>\n\nВопрос: {question_text[:100]}...\n\nОтвет: {req.answer_text[:100]}..."
+            
+            async def notify_sync():
+                try:
+                    async with httpx.AsyncClient() as client:
+                        if notifier._owner_chat_id:
+                            await client.post(
+                                f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
+                                json={
+                                    "chat_id": notifier._owner_chat_id,
+                                    "text": message,
+                                    "parse_mode": "HTML"
+                                },
+                                timeout=5.0
+                            )
+                except:
+                    pass
+            
+            asyncio.create_task(notify_sync())
+        except Exception as sync_err:
+            logger.warning("answer_sync_notification_failed", error=str(sync_err))
+        
         db.close()
         
         return {

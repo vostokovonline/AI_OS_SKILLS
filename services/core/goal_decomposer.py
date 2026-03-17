@@ -164,6 +164,93 @@ class GoalDecomposer:
             logger.error("domain_analysis_failed", error=str(e))
             return ["general"]
 
+    async def decompose_snapshot(
+        self, 
+        snapshot: "GoalSnapshot", 
+        max_depth: int = 3
+    ) -> "DecompositionDecision":
+        """
+        PURE DECOMPOSITION - работает только со снапшотом.
+        
+        Это метод для использования с UseCase - не знает про базу, UoW, ORM.
+        
+        Args:
+            snapshot: GoalSnapshot (чистый DTO)
+            max_depth: Максимальная глубина
+            
+        Returns:
+            DecompositionDecision с намерениями
+        """
+        from application.domain_intents import (
+            GoalSnapshot as GoalSnapshotDTO,
+            GoalStateChange,
+            ProposedSubgoal,
+            DecompositionDecision
+        )
+        
+        # Валидация глубины
+        if snapshot.depth_level >= max_depth:
+            return DecompositionDecision(
+                parent_snapshot=snapshot,
+                state_changes=[],
+                proposed_subgoals=[],
+                diagnostics={"reason": "max_depth_reached"}
+            )
+        
+        # Генерируем подцели (это единственное что делает decomposer)
+        try:
+            # Создаём псевдо-объект для совместимости с _generate_subgoals
+            class FakeGoal:
+                def __init__(self, snap):
+                    self.title = snap.title
+                    self.description = snap.description
+                    self.goal_type = snap.goal_type
+                    self.depth_level = snap.depth_level
+                    self.domains = snap.domains
+                    self.id = snap.id
+            
+            fake_goal = FakeGoal(snapshot)
+            subgoals_data = await self._generate_subgoals(fake_goal)
+            
+            # Конвертируем в ProposedSubgoal
+            proposed = []
+            for sg in subgoals_data:
+                proposed.append(ProposedSubgoal(
+                    title=sg.get("title", ""),
+                    description=sg.get("description", ""),
+                    goal_type=sg.get("goal_type", "achievable"),
+                    depth_level=snapshot.depth_level + 1,
+                    domains=sg.get("domains", []),
+                    is_atomic=sg.get("is_atomic", False),
+                    completion_criteria=sg.get("completion_criteria"),
+                    success_definition=sg.get("success_definition")
+                ))
+            
+            # Если созданы подцели - предлагаем активировать родителя
+            state_changes = []
+            if proposed:
+                state_changes.append(GoalStateChange(
+                    goal_id=snapshot.id,
+                    new_state="active",
+                    rationale=f"Created {len(proposed)} subgoals"
+                ))
+            
+            return DecompositionDecision(
+                parent_snapshot=snapshot,
+                state_changes=state_changes,
+                proposed_subgoals=proposed,
+                diagnostics={"subgoals_count": len(proposed)}
+            )
+            
+        except Exception as e:
+            logger.error("decompose_snapshot_error", error=str(e))
+            return DecompositionDecision(
+                parent_snapshot=snapshot,
+                state_changes=[],
+                proposed_subgoals=[],
+                diagnostics={"error": str(e)}
+            )
+
     async def decompose_goal(self, goal_id: str, max_depth: int = 3) -> List[Dict]:
         """
         Декомпозирует цель на подцели
@@ -289,7 +376,7 @@ class GoalDecomposer:
                     completion_criteria=subgoal_data.get("completion_criteria"),
                     success_definition=subgoal_data.get("success_definition"),
                     goal_contract=subgoal_contract,  # 🔑 v3.0
-                    status="pending",
+                    _status="pending",
                     progress=0.0
                 )
                 db.add(subgoal)
@@ -323,8 +410,8 @@ class GoalDecomposer:
                         logger.error("transition_to_active_failed", result=transition_result)
                         return created_subgoals
 
+                    goal._internal_set_status("active")
                     goal.progress = 0.0
-                    goal.status = "active"
 
                 logger.info("parent_goal_activated", goal_title=goal.title, subgoals_count=len(created_subgoals))
 
@@ -482,11 +569,10 @@ class GoalDecomposer:
 
         # Создаем LLM с таймаутом для декомпозиции
         llm = ChatOpenAI(
-            base_url=os.getenv("LLM_BASE_URL"),
+            base_url=os.getenv("LLM_BASE_URL", "http://litellm:4000/v1"),
             api_key=os.getenv("OPENAI_API_KEY", "sk-1234"),
-            model=os.getenv("LLM_MODEL", "ollama/qwen3-coder:480b-cloud"),
-            temperature=0.2,
-            request_timeout=120  # 2 минуты (qwen3-coder очень быстрый!)
+            model="local-coder",  # Available in LiteLLM config
+            temperature=0.3
         )
 
         # Phase 1: Получаем профиль пользователя из Personality Engine

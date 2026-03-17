@@ -16,29 +16,54 @@ from agents.prompts import *
 
 checkpointer = MemorySaver()
 
-# --- HYBRID MODEL SELECTOR WITH FALLBACK ---
+# --- INTELLIGENT MODEL ROTATOR WITH LOAD BALANCING ---
 def get_model(role="DEFAULT"):
     """
-    Возвращает LangChain модель с учетом роли агента.
+    Возвращает LangChain модель с умной ротацией.
 
-    Использует разные модели для разных задач:
-    - SUPERVISOR: qwen3-coder (быстрый роутинг)
-    - CODER: qwen3-coder (код)
-    - PM: gpt-oss (управление целями)
-    - RESEARCHER: qwen3-coder (поиск)
-    - DEFAULT: qwen3-coder (общая модель)
+    НОВАЯ СИСТЕМА (v2.0):
+    - Ротация через 7 моделей (круговой)
+    - Предпочтение облачных моделей (не нагружают ПК)
+    - Локальная модель используется редко
+    - Cold start avoidance (предотвращает задержки)
+    - Load balancing (распределяет нагрузку)
+
+    Доступные модели:
+    1. minimax-m2:cloud (облачная, быстрая)
+    2. glm-4.6:cloud (облачная)
+    3. gpt-oss:120b-cloud (облачная, большая)
+    4. qwen3-coder:480b-cloud (облачная, код)
+    5. qwen3-vl:235b-cloud (облачная, визуальная)
+    6. qwen2.5-coder:latest (ЛОКАЛЬНАЯ, 4.7GB)
+    7. deepseek-v3.1:671b-cloud (облачная, рассуждения)
     """
-    # Mapping ролей на модели
-    MODEL_MAPPING = {
-        "SUPERVISOR": "ollama/gpt-oss:120b-cloud",         # ⚡ Быстрый роутинг (120B)
-        "CODER": "ollama/qwen3-coder:480b-cloud",          # 💻 Код (480B)
-        "PM": "ollama/gpt-oss:120b-cloud",                 # 🎯 Управление (120B)
-        "RESEARCHER": "ollama/qwen3-coder:480b-cloud",     # 🔍 Поиск (480B)
-        "INTELLIGENCE": "ollama/deepseek-v3.1:671b-cloud", # 🧠 Сложные рассуждения (671B)
-        "DEFAULT": "ollama/qwen3-coder:480b-cloud"
-    }
+    # Try to use intelligent rotator
+    try:
+        from model_rotator import model_rotator
 
-    model_name = MODEL_MAPPING.get(role, os.getenv("LLM_MODEL", "ollama/qwen3-coder:480b-cloud"))
+        # Select model based on rotation strategy
+        model_name = model_rotator.select_model(role)
+
+        logger.debug(
+            "model_selected_by_rotator",
+            role=role,
+            model=model_name
+        )
+
+    except Exception as e:
+        # Fallback to simple mapping if rotator fails
+        logger.warning("model_rotator_failed", error=str(e), fallback="simple_mapping")
+
+        MODEL_MAPPING = {
+            "SUPERVISOR": "local-coder",
+            "CODER": "local-coder",
+            "PM": "local-coder",
+            "RESEARCHER": "local-coder",
+            "INTELLIGENCE": "deepseek-reasoner",
+            "DEFAULT": "local-coder"
+        }
+
+        model_name = MODEL_MAPPING.get(role, os.getenv("LLM_MODEL", "local-coder"))
 
     # Temperature по роли
     if role == "SUPERVISOR":

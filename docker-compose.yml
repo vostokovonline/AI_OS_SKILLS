@@ -28,6 +28,11 @@ services:
       LLM_MODEL: ${LLM_MODEL:-cloud-reasoner}
       OPENAI_API_BASE: http://ns_litellm:4000/v1
       OPENAI_API_KEY: sk-1234
+      # Execution V3 Feature Flags
+      ENABLE_EXECUTION_V3: ${ENABLE_EXECUTION_V3:-false}
+      EXECUTION_V3_PERCENTAGE: ${EXECUTION_V3_PERCENTAGE:-10}
+      EXECUTION_V3_STALE_LOCK_TIMEOUT: ${EXECUTION_V3_STALE_LOCK_TIMEOUT:-300}
+      BASELINE_OBSERVATION_HOURS: ${BASELINE_OBSERVATION_HOURS:-48}
     networks:
     - ns_network
     ports:
@@ -102,7 +107,7 @@ services:
     - host.docker.internal:172.25.48.1
     - ollama.host:172.25.48.1
     healthcheck:
-      test: ["CMD", "curl", "-f", "-H", "Authorization: Bearer sk-1234", "http://localhost:4000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; req = urllib.request.Request('http://localhost:4000/health', headers={'Authorization': 'Bearer sk-1234'}); urllib.request.urlopen(req, timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3

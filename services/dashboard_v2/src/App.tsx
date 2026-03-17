@@ -27,6 +27,14 @@ import { Federation } from "./pages/Federation";
 import { Artifacts } from "./pages/Artifacts";
 import Autonomy from "./pages/Autonomy";
 import Admin from "./pages/Admin";
+import Decision from "./pages/Decision";
+import LLMAnalytics from "./pages/LLMAnalytics";
+import SystemHealth from "./pages/SystemHealth";
+import Performance from "./pages/Performance";
+import UnifiedChat from "./pages/UnifiedChat";
+import { LLMControlCenter } from "./pages/LLMControlCenter";
+import ControlCenter from "./pages/ControlCenter";
+import Evolution from "./pages/Evolution";
 // import QuestionsViewTest from './components/questions/QuestionsViewTest';
 import { useExecutionLogStore } from './store/executionLogStore';
 import { X } from 'lucide-react';
@@ -61,46 +69,76 @@ const App: React.FC = () => {
 
         {/* Main Content */}
         <div className="flex-1 relative">
-          {/* OCCP Pages */}
-          <div className={view === 'skills' ? 'absolute inset-0 bg-white' : 'hidden'}>
+          {/* OCCP Pages - Fixed backgrounds for dark theme */}
+          <div className={view === 'skills' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Skills />
           </div>
-          <div className={view === 'deployments' ? 'absolute inset-0 bg-white' : 'hidden'}>
+          <div className={view === 'deployments' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Deployments />
           </div>
-          <div className={view === 'occp-observability' ? 'absolute inset-0 bg-white' : 'hidden'}>
+          <div className={view === 'occp-observability' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Observability />
           </div>
-          <div className={view === 'federation' ? 'absolute inset-0 bg-white' : 'hidden'}>
+          <div className={view === 'federation' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Federation />
           </div>
-          <div className={view === 'artifacts' ? 'absolute inset-0 bg-white' : 'hidden'}>
+          <div className={view === 'artifacts' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Artifacts />
           </div>
-          <div className={view === 'autonomy' ? 'absolute inset-0 bg-gray-50' : 'hidden'}>
+          <div className={view === 'autonomy' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Autonomy />
           </div>
-          <div className={view === 'admin' ? 'absolute inset-0 bg-gray-50' : 'hidden'}>
+          <div className={view === 'admin' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <Admin />
+          </div>
+          <div className={view === 'decision' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <Decision />
+          </div>
+
+          {/* New Analytics Pages - Fixed backgrounds */}
+          <div className={view === 'llm-analytics' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <LLMAnalytics />
+          </div>
+          <div className={view === 'system-health' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <SystemHealth />
+          </div>
+          <div className={view === 'performance' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <Performance />
+          </div>
+          <div className={view === 'unified-chat' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <UnifiedChat />
+          </div>
+          <div className={view === 'llm-control' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <LLMControlCenter />
+          </div>
+
+          {/* Control Center - Metrics Dashboard */}
+          <div className={view === 'control-center' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <ControlCenter />
+          </div>
+
+          {/* Evolution Dashboard - Self-Evolving OS */}
+          <div className={view === 'evolution' ? 'absolute inset-0 bg-gray-100 overflow-auto' : 'hidden'}>
+            <Evolution />
           </div>
 
           {/* Observability Console */}
-          <div className={view === 'observability' ? 'absolute inset-0' : 'hidden'}>
+          <div className={view === 'observability' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <ObservabilityConsole />
           </div>
 
           {/* Questions Screen */}
-          <div className={view === 'questions' ? 'absolute inset-0' : 'hidden'}>
+          <div className={view === 'questions' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <QuestionsScreen />
           </div>
 
           {/* Decomposition Screen */}
-          <div className={view === 'decomposition' ? 'absolute inset-0' : 'hidden'}>
+          <div className={view === 'decomposition' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <DecompositionScreen />
           </div>
 
           {/* Graph/Gantt/Tree Views */}
-          <div className={view !== 'observability' && view !== 'questions' && view !== 'decomposition' && view !== 'skills' && view !== 'deployments' && view !== 'occp-observability' && view !== 'federation' && view !== 'artifacts' && view !== 'autonomy' && view !== 'admin' ? 'absolute inset-0 flex' : 'hidden'}>
+          <div className={view !== 'observability' && view !== 'questions' && view !== 'decomposition' && view !== 'skills' && view !== 'deployments' && view !== 'occp-observability' && view !== 'federation' && view !== 'artifacts' && view !== 'autonomy' && view !== 'admin' && view !== 'decision' && view !== 'llm-analytics' && view !== 'system-health' && view !== 'performance' && view !== 'unified-chat' && view !== 'llm-control' ? 'absolute inset-0 flex' : 'hidden'}>
             {/* Center Canvas */}
             <div className="flex-1 flex flex-col">
               {view === 'graph' && <GraphCanvas />}
