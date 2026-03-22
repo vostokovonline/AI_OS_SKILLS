@@ -15,10 +15,12 @@ ARCHITECTURE v3.0:
 - All transactions opened by caller, not internally
 """
 import os
+import json
 from uuid import UUID
 from pathlib import Path
 from typing import Dict, Optional
 from sqlalchemy import select
+from database import AsyncSessionLocal
 from models import Goal
 
 # Import canonical skill system
@@ -60,6 +62,14 @@ from application.events.bus import get_event_bus
 from application.events.execution_events import SkillExecuted
 
 logger = get_logger(__name__)
+
+# NEW: CapabilityPlanner for task-graph planning
+try:
+    from capability import capability_planner
+    CAPABILITY_PLANNER_AVAILABLE = True
+except ImportError:
+    CAPABILITY_PLANNER_AVAILABLE = False
+    logger.warning("capability_planner_not_available")
 
 # Import Skill Evolution Loop for learning
 try:
@@ -744,7 +754,9 @@ class GoalExecutorV2:
             # Try MCP for missing capabilities
             if required_capabilities:
                 self._try_mcp_generation(required_capabilities, requirements, goal_snapshot)
-            return EchoSkill()
+            # FIXED: Return None instead of EchoSkill to signal capability gap
+            logger.warning("no_skills_available", capabilities=required_capabilities)
+            return None
 
         scored_skills = []
         
@@ -780,7 +792,10 @@ class GoalExecutorV2:
                 if req_art in skill_artifacts:
                     score += 3
 
-            # EXPERIENCE-BASED SCORING (proper formula)
+            # EXPERIENCE-BASED SCORING
+            # CAPABILITY MATCH is PRIMARY (not reliability!)
+            # Formula: capability_match (primary) + reliability (secondary)
+            
             if skill_id in skill_stats:
                 stats = skill_stats[skill_id]
                 success_rate = stats.get('success_rate', 0.5)
@@ -788,18 +803,17 @@ class GoalExecutorV2:
                 exploration_bonus = stats.get('exploration_bonus', 1.0)
                 avg_confidence = stats.get('avg_confidence', 0.5)
 
-                # PROPER SCORING FORMULA (as per user specs)
-                # success_rate * 0.55 + speed * 0.2 + exploration * 0.15 + confidence * 0.1
-
                 # Speed score: 1 / (1 + latency/1000) = faster is better
                 speed_score = 1.0 / (1.0 + avg_latency / 1000.0)
 
-                # Composite experience score (0-20 scale to match capability scoring)
+                # Composite experience score - LOWER reliability weight
+                # Capability match: up to 30 points (MUST match to be selected)
+                # Reliability: up to 5 points (secondary, not primary)
                 experience_score = (
-                    success_rate * 0.55 * 20 +      # 0-11 points
-                    speed_score * 0.2 * 20 +         # 0-4 points
-                    exploration_bonus * 0.15 * 20 +  # 0-3 points
-                    avg_confidence * 0.1 * 20         # 0-2 points
+                    success_rate * 0.1 * 20 +        # 0-2 points (was 11!)
+                    speed_score * 0.05 * 20 +         # 0-1 points (was 4!)
+                    exploration_bonus * 0.05 * 20 +   # 0-1 points (was 3!)
+                    avg_confidence * 0.05 * 20        # 0-1 points (was 2!)
                 )
 
                 score += experience_score
@@ -848,8 +862,15 @@ class GoalExecutorV2:
             candidates_count=len(scored_skills)
         )
 
+        # FIXED: Return None when no skills match (capability gap)
         if not scored_skills:
-            return EchoSkill()
+            logger.warning(
+                "no_skills_match_capabilities",
+                goal_id=goal_id,
+                required_capabilities=required_capabilities,
+                required_artifacts=required_artifacts
+            )
+            return None
 
         # EPSILON-GREEDY EXPLORATION
         # 15% chance to explore random skill instead of best
@@ -999,6 +1020,593 @@ class GoalExecutorV2:
                 error=str(e)
             )
 
+    async def _find_pattern_pipeline(self, goal_title: str, goal_description: str = "") -> list:
+        """
+        CRITICAL: Find BEST matching pattern using ENHANCED capability-based matching.
+        
+        Two-stage matching:
+        1. Infer capabilities from goal
+        2. Find patterns matching those capabilities
+        
+        This enables generalization - different goals map to same patterns.
+        
+        Returns:
+            List of skill instances (or empty list if no good match)
+        """
+        global skill_registry
+        
+        try:
+            from semantic.enhanced_matcher import enhanced_matcher
+            
+            result = await enhanced_matcher.find_best_pattern(
+                goal_title=goal_title,
+                goal_description=goal_description
+            )
+            
+            if result:
+                confidence = result.get("confidence", "low")
+                skill_sequence = result.get("skill_sequence", [])
+                capabilities = result.get("capabilities", [])
+                
+                skills = []
+                for skill_id in skill_sequence:
+                    if isinstance(skill_id, str):
+                        skill = skill_registry.get(skill_id)
+                        if skill:
+                            skills.append(skill)
+                
+                if confidence in ("high", "medium") and len(skills) >= 2:
+                    logger.info(
+                        "capability_pattern_matched",
+                        pattern_id=result["pattern_id"],
+                        confidence=confidence,
+                        capabilities=capabilities[:3],
+                        skills=[normalize_skill_id(s) for s in skills]
+                    )
+                    return skills
+            
+            logger.info("no_capability_match_using_planner")
+            return []
+                
+        except ImportError as e:
+            logger.warning("enhanced_matcher_not_available", error=str(e))
+            return []
+        except Exception as e:
+            logger.warning("capability_match_failed", error=str(e))
+            return []
+
+    async def _get_skill_pipeline(self, goal_snapshot: dict, requirements: dict) -> list:
+        """
+        CRITICAL: Get skill pipeline - FIRST from patterns, THEN from planner.
+        
+        This is the KEY to evolution - patterns MUST be reused!
+        
+        Returns:
+            List of skills (or empty list if no pipeline)
+        """
+        global skill_registry, capability_planner
+        
+        goal_title = goal_snapshot.get("title", "").lower()
+        goal_description = goal_snapshot.get("description", "").lower()
+        
+        # CRITICAL STEP 1: Check existing patterns FIRST!
+        pattern_pipeline = await self._find_pattern_pipeline(goal_title, goal_description)
+        if pattern_pipeline:
+            logger.info("pipeline_from_pattern", skills=pattern_pipeline, goal_title=goal_title[:50])
+            return pattern_pipeline
+        
+        # STEP 2: No pattern found - generate new pipeline
+        logger.info("pipeline_generated", source="capability_planner", goal_title=goal_title[:50])
+        
+        if not CAPABILITY_PLANNER_AVAILABLE:
+            return []
+        
+        try:
+            # Initialize planner if needed
+            if not hasattr(capability_planner, '_initialized') or not capability_planner._initialized:
+                await capability_planner.initialize()
+            
+            # Create goal object
+            from dataclasses import dataclass
+            @dataclass
+            class GoalObj:
+                id: str
+                title: str
+                description: str
+                goal_type: str = "achievable"
+            
+            goal_obj = GoalObj(
+                id=goal_snapshot.get("id", ""),
+                title=goal_snapshot.get("title", ""),
+                description=goal_snapshot.get("description", "")
+            )
+            
+            # Plan using capability graph
+            plan = await capability_planner.plan_goal(goal_obj)
+            
+            # Get execution order (list of skill IDs)
+            skill_ids = plan.execution_order
+            
+            if not skill_ids or len(skill_ids) < 2:
+                # Single skill or no pipeline - don't force pipeline
+                return []
+            
+            # Convert skill IDs to skill instances
+            skills = []
+            for skill_id in skill_ids:
+                skill = skill_registry.get(skill_id)
+                if skill:
+                    skills.append(skill)
+            
+            if len(skills) >= 2:
+                logger.info(
+                    "pipeline_built",
+                    pipeline_length=len(skills),
+                    skills=[normalize_skill_id(s) for s in skills]
+                )
+                return skills
+            
+            return []
+            
+        except Exception as e:
+            logger.warning("pipeline_building_failed", error=str(e))
+            return []
+
+    async def _execute_pipeline(
+        self,
+        uow,
+        goal,
+        skills: list,
+        goal_snapshot: dict,
+        trace: dict
+    ) -> dict:
+        """
+        Execute a pipeline of skills in sequence.
+        
+        This is critical for:
+        1. Multi-step execution (real work)
+        2. Evolution learning (patterns from sequences)
+        3. Better outcomes (compose multiple skills)
+        
+        CRITICAL FIX: Shared context between steps - outputs become inputs!
+        
+        Args:
+            uow: UnitOfWork
+            goal: Goal object
+            skills: List of skill instances to execute
+            goal_snapshot: Goal snapshot dict
+            trace: Execution trace dict
+            
+        Returns:
+            Execution result dict
+        """
+        from canonical_skills.base import SkillResult
+        from datetime import datetime
+        
+        global skill_registry
+        
+        logger.info("pipeline_execution_started", skills_count=len(skills))
+        
+        all_artifacts = []
+        all_errors = []
+        skill_sequence = []  # FOR EVOLUTION: Log the real sequence
+        
+        # CRITICAL: Shared context - outputs become inputs for next step!
+        pipeline_context = {
+            "goal_id": str(goal.id),
+            "goal_title": goal_snapshot.get("title", ""),
+            "goal_description": goal_snapshot.get("description", ""),
+            "artifacts": [],  # Collected artifacts from all steps
+            "data": {},  # Key-value data from each step
+            "step_outputs": {},  # Raw outputs from each step
+            "total_steps": len(skills),
+            "pipeline_mode": True
+        }
+        
+        # Transition goal to active
+        await transition_service.transition(
+            uow=uow,
+            goal_id=goal.id,
+            new_state="active",
+            reason="Starting pipeline execution",
+            actor="goal_executor_v2.pipeline"
+        )
+        
+        # Execute each skill in sequence with SHARED CONTEXT
+        for i, skill in enumerate(skills):
+            skill_id = normalize_skill_id(skill)
+            skill_sequence.append(skill_id)
+            
+            step_num = i + 1
+            logger.info("pipeline_step", step=step_num, total=len(skills), skill=skill_id)
+            
+            trace["steps"].append({
+                "step": step_num,
+                "skill": skill_id,
+                "status": "executing",
+                "has_prior_output": len(pipeline_context["step_outputs"]) > 0
+            })
+            
+            try:
+                # CRITICAL: Prepare inputs WITH prior outputs (shared context)!
+                inputs = await self._prepare_inputs_with_context(goal, skill, pipeline_context)
+                
+                # Execute skill with full context
+                context = {
+                    "goal_id": str(goal.id),
+                    "session_id": f"pipeline_{goal.id}",
+                    "goal_title": goal_snapshot.get("title", ""),
+                    "step": step_num,
+                    "total_steps": len(skills),
+                    "pipeline_mode": True,
+                    "prior_artifacts": pipeline_context["artifacts"],
+                    "prior_data": pipeline_context["data"],
+                    "step_outputs": pipeline_context["step_outputs"]
+                }
+                
+                result: SkillResult = skill.execute(inputs, context)
+                
+                # CRITICAL: Store outputs for next step!
+                pipeline_context["step_outputs"][skill_id] = {
+                    "success": result.success,
+                    "output": result.output,
+                    "error": result.error
+                }
+                pipeline_context["data"][skill_id] = result.output
+                
+                if result.success:
+                    trace["steps"][-1]["status"] = "success"
+                    trace["steps"][-1]["artifacts_count"] = len(result.artifacts)
+                    trace["steps"][-1]["output"] = result.output
+                    all_artifacts.extend(result.artifacts)
+                    pipeline_context["artifacts"].extend(result.artifacts)
+                    
+                    logger.info("pipeline_step_success", step=step_num, skill=skill_id, artifacts=len(result.artifacts))
+                else:
+                    trace["steps"][-1]["status"] = "failed"
+                    trace["steps"][-1]["error"] = result.error
+                    all_errors.append(result.error)
+                    
+                    logger.warning("pipeline_step_failed", step=step_num, skill=skill_id, error=result.error)
+                    
+                    # CRITICAL: Fail fast on first step failure (better for learning)
+                    logger.info("pipeline_aborted_on_failure", step=step_num, skill=skill_id)
+                    break
+                    
+            except Exception as e:
+                error_msg = str(e)
+                trace["steps"][-1]["status"] = "error"
+                trace["steps"][-1]["error"] = error_msg
+                all_errors.append(error_msg)
+                logger.error("pipeline_step_exception", step=step_num, skill=skill_id, error=error_msg)
+                
+                # CRITICAL: Fail fast on exception
+                logger.info("pipeline_aborted_on_exception", step=step_num, skill=skill_id)
+                break
+        
+        # FINALIZE PIPELINE
+        # Record the FULL SKILL SEQUENCE for evolution learning!
+        trace["skill_sequence"] = skill_sequence
+        trace["pipeline_completed"] = True
+        trace["total_steps"] = len(skills)
+        trace["successful_steps"] = sum(1 for s in trace["steps"] if s.get("status") == "success")
+        
+        # LOG TO EVOLUTION: Create pattern from sequence
+        if len(skill_sequence) >= 2:
+            await self._log_execution_pattern(goal, skill_sequence, all_artifacts)
+        
+        # CRITICAL: Stricter success criteria - ALL steps must succeed for pattern to be useful
+        overall_success = (
+            trace["successful_steps"] == len(skills) and  # ALL steps must succeed
+            len(all_artifacts) > 0  # Must produce artifacts
+        )
+        
+        # Register artifacts
+        for artifact in all_artifacts:
+            await self._register_artifact(uow, goal, artifact)
+        
+        # Update goal
+        goal.execution_trace = trace
+        goal.progress = len(all_artifacts) / max(1, len(skills))
+        await self._save_goal_with_uow(uow, goal)
+        
+        # Transition based on success
+        if overall_success:
+            await transition_service.transition(
+                uow=uow,
+                goal_id=goal.id,
+                new_state="completed",
+                reason=f"Pipeline completed: {trace['successful_steps']}/{len(skills)} steps",
+                actor="goal_executor_v2.pipeline"
+            )
+            status = "completed"
+        else:
+            await transition_service.transition(
+                uow=uow,
+                goal_id=goal.id,
+                new_state="failed",
+                reason=f"Pipeline partially failed: {trace['successful_steps']}/{len(skills)} steps",
+                actor="goal_executor_v2.pipeline"
+            )
+            status = "failed"
+        
+        logger.info(
+            "pipeline_execution_completed",
+            status=status,
+            steps=len(skills),
+            successful=trace["successful_steps"],
+            artifacts=len(all_artifacts),
+            sequence=skill_sequence
+        )
+        
+        return {
+            "status": status,
+            "pipeline_mode": True,
+            "skill_sequence": skill_sequence,
+            "steps": len(skills),
+            "successful_steps": trace["successful_steps"],
+            "artifacts_count": len(all_artifacts),
+            "errors": all_errors
+        }
+
+    async def _log_execution_pattern(self, goal, skill_sequence: list, artifacts: list):
+        """
+        Log execution pattern with embedding for semantic matching.
+        
+        Creates skill_patterns with:
+        - Pattern ID (normalized hash)
+        - Skill sequence
+        - Embedding for semantic search
+        - Goal text for matching
+        - Success rate and frequency
+        """
+        from sqlalchemy import text
+        from datetime import datetime
+        from semantic.embedding_service import embed_text, build_embedding_text
+        
+        try:
+            artifact_types = list(set(
+                a.get("type", "UNKNOWN") if isinstance(a, dict) else "UNKNOWN" 
+                for a in artifacts
+            ))
+            
+            # Get goal info
+            goal_title = getattr(goal, 'title', '') or ''
+            goal_description = getattr(goal, 'description', '') or ''
+            
+            # Build embedding text
+            embedding_text = build_embedding_text(goal_title, goal_description, skill_sequence)
+            
+            # Generate embedding
+            embedding = embed_text(embedding_text)
+            
+            # Normalize pattern ID
+            import hashlib
+            normalized_seq = "_".join(sorted(s.lower() for s in skill_sequence))
+            pattern_hash = hashlib.md5(normalized_seq.encode()).hexdigest()[:16]
+            pattern_id = f"pattern_{pattern_hash}"
+            
+            success_rate = 0.8 if len(artifacts) > 0 else 0.3
+            
+            async with AsyncSessionLocal() as session:
+                # Upsert pattern with embedding
+                if embedding:
+                    upsert_sql = text("""
+                        INSERT INTO skill_patterns (id, pattern_id, skill_sequence, frequency, avg_success_rate, common_artifact_types, embedding, goal_text, discovered_at, last_seen_at)
+                        VALUES (gen_random_uuid(), :pattern_id, :skill_sequence::jsonb, 1, :success_rate, :artifact_types::jsonb, :embedding::jsonb, :goal_text, NOW(), NOW())
+                        ON CONFLICT (pattern_id) DO UPDATE SET
+                            frequency = skill_patterns.frequency + 1,
+                            avg_success_rate = (skill_patterns.avg_success_rate + :success_rate) / 2,
+                            embedding = COALESCE(:embedding::jsonb, skill_patterns.embedding),
+                            goal_text = COALESCE(:goal_text, skill_patterns.goal_text),
+                            last_seen_at = NOW()
+                    """)
+                else:
+                    upsert_sql = text("""
+                        INSERT INTO skill_patterns (id, pattern_id, skill_sequence, frequency, avg_success_rate, common_artifact_types, goal_text, discovered_at, last_seen_at)
+                        VALUES (gen_random_uuid(), :pattern_id, :skill_sequence::jsonb, 1, :success_rate, :artifact_types::jsonb, :goal_text, NOW(), NOW())
+                        ON CONFLICT (pattern_id) DO UPDATE SET
+                            frequency = skill_patterns.frequency + 1,
+                            avg_success_rate = (skill_patterns.avg_success_rate + :success_rate) / 2,
+                            goal_text = COALESCE(:goal_text, skill_patterns.goal_text),
+                            last_seen_at = NOW()
+                    """)
+                
+                await session.execute(upsert_sql, {
+                    "pattern_id": pattern_id,
+                    "skill_sequence": json.dumps(skill_sequence),
+                    "success_rate": success_rate,
+                    "artifact_types": json.dumps(artifact_types),
+                    "embedding": json.dumps(embedding) if embedding else None,
+                    "goal_text": embedding_text
+                })
+                await session.commit()
+            
+            logger.info(
+                "execution_pattern_logged",
+                pattern_id=pattern_id,
+                pattern_length=len(skill_sequence),
+                sequence=skill_sequence,
+                has_embedding=embedding is not None,
+                artifacts=artifact_types
+            )
+            
+        except Exception as e:
+            logger.warning("pattern_logging_failed", error=str(e))
+
+    async def _prepare_inputs_with_context(self, goal, skill, pipeline_context: dict) -> dict:
+        """
+        CRITICAL: Prepare inputs for skill using outputs from previous steps.
+        
+        This enables skills to compose - output from step N becomes input for step N+1.
+        
+        Example:
+            Step 1: web_research -> {"text": "AI news"}
+            Step 2: summarize -> {"text": "AI news from step 1"}
+        
+        Args:
+            goal: Goal object
+            skill: Skill instance
+            pipeline_context: Shared context with outputs from previous steps
+            
+        Returns:
+            Inputs dict for the skill
+        """
+        skill_id = normalize_skill_id(skill)
+        
+        # Get base inputs from standard preparation
+        base_inputs = await self._prepare_inputs(goal, skill)
+        
+        # CRITICAL: Enhance inputs with outputs from previous steps
+        if pipeline_context.get("step_outputs"):
+            prior_outputs = pipeline_context["step_outputs"]
+            
+            # Try to extract useful data from previous outputs
+            for prev_skill_id, output_data in prior_outputs.items():
+                if not output_data.get("success"):
+                    continue
+                    
+                output = output_data.get("output", {})
+                
+                # If previous step produced text, pass it to next step
+                if isinstance(output, dict):
+                    # Text content from previous step
+                    if "text" in output and "text" not in base_inputs:
+                        base_inputs["text"] = output["text"]
+                        base_inputs["prior_text_source"] = prev_skill_id
+                    
+                    # Keywords from research
+                    if "keywords" in output and "keywords" not in base_inputs:
+                        base_inputs["keywords"] = output["keywords"]
+                        base_inputs["prior_keywords_source"] = prev_skill_id
+                    
+                    # File paths
+                    if "file_path" in output and "path" not in base_inputs:
+                        base_inputs["path"] = output["file_path"]
+                    
+                    # Raw data
+                    if "data" in output:
+                        base_inputs["prior_data"] = output["data"]
+            
+            # Add pipeline metadata to inputs
+            base_inputs["pipeline_context"] = {
+                "total_steps": pipeline_context.get("total_steps", 0),
+                "prior_artifacts_count": len(pipeline_context.get("artifacts", [])),
+                "has_prior_output": True
+            }
+        
+        logger.debug(
+            "inputs_enhanced_with_context",
+            skill=skill_id,
+            base_keys=list(base_inputs.keys()),
+            has_prior=bool(pipeline_context.get("step_outputs"))
+        )
+        
+        return base_inputs
+
+    async def _log_execution_pattern(self, goal, skill_sequence: list, artifacts: list):
+        """Register artifact from skill execution."""
+        from models import Artifact
+        from uuid import uuid4
+        
+        try:
+            artifact_record = Artifact(
+                id=uuid4(),
+                goal_id=goal.id,
+                artifact_type=artifact.get("type", "FILE"),
+                content_kind=artifact.get("content_kind", "data"),
+                content_location=artifact.get("content_location", ""),
+                content_text=artifact.get("content_text", ""),
+                verification_rule=artifact.get("verification_rule"),
+                verification_status="pending"
+            )
+            uow.session.add(artifact_record)
+            logger.debug("artifact_registered", type=artifact.get("type"))
+        except Exception as e:
+            logger.warning("artifact_registration_failed", error=str(e))
+
+    async def _select_skill_with_planner(self, goal_snapshot: dict):
+        """
+        NEW: Task Graph planning using CapabilityPlanner.
+        
+        Uses CapabilityPlanner to:
+        1. Decompose goal into capabilities
+        2. Build capability graph with dependencies
+        3. Resolve each capability to existing skills
+        4. Return skills in execution order
+        
+        This enables:
+        - Multi-step pipelines (skill chains)
+        - Better capability matching
+        - Discovery of missing capabilities
+        """
+        global skill_registry
+        
+        try:
+            # Initialize planner if needed
+            if not hasattr(capability_planner, '_initialized') or not capability_planner._initialized:
+                await capability_planner.initialize()
+            
+            # Create minimal goal object from snapshot
+            from dataclasses import dataclass
+            
+            @dataclass
+            class GoalSnapshot:
+                id: str
+                title: str
+                description: str
+                goal_type: str = "achievable"
+            
+            goal_obj = GoalSnapshot(
+                id=goal_snapshot.get("id", ""),
+                title=goal_snapshot.get("title", ""),
+                description=goal_snapshot.get("description", "")
+            )
+            
+            # Plan using capability graph
+            plan = await capability_planner.plan_goal(goal_obj)
+            
+            # Check if we have ready capabilities
+            if plan.ready_capabilities == 0:
+                logger.info(
+                    "planner_no_ready_skills",
+                    goal_id=str(goal_snapshot.get("id", ""))[:8],
+                    missing=plan.missing_capabilities
+                )
+                return None
+            
+            # Get execution order - skills in pipeline order
+            skill_ids = plan.execution_order
+            
+            if not skill_ids:
+                return None
+            
+            # Get first skill from pipeline
+            first_skill_id = skill_ids[0]
+            
+            # Look up skill in registry
+            skill = skill_registry.get(first_skill_id)
+            
+            if skill:
+                logger.info(
+                    "planner_skill_selected",
+                    skill_id=first_skill_id,
+                    pipeline_length=len(skill_ids),
+                    ready=plan.ready_capabilities,
+                    missing=plan.missing_capabilities
+                )
+                return skill
+            
+            return None
+            
+        except Exception as e:
+            logger.warning(
+                "planner_selection_failed",
+                error=str(e),
+                goal_id=str(goal_snapshot.get("id", ""))[:8]
+            )
+            return None
+
     async def _select_skill_with_performance(
         self,
         requirements: dict,
@@ -1015,7 +1623,18 @@ class GoalExecutorV2:
         """
         from infrastructure.execution_repositories import SkillStatsRepository
 
-        # Get base skill selection (capability matching)
+        # NEW: Try CapabilityPlanner first (Task Graph planning)
+        if CAPABILITY_PLANNER_AVAILABLE:
+            planner_skill = await self._select_skill_with_planner(goal_snapshot)
+            if planner_skill:
+                logger.info(
+                    "skill_selected_via_planner",
+                    skill_id=getattr(planner_skill, 'id', 'unknown'),
+                    method="capability_planner"
+                )
+                return planner_skill
+
+        # Fallback to legacy selection
         skill = await self._select_skill(requirements, goal_snapshot)
 
         # Try to enhance with performance metrics
@@ -1268,7 +1887,24 @@ class GoalExecutorV2:
                 "requirements": requirements
             })
 
-            # Step 2: Select skill (PHASE 1: with performance metrics)
+            # Step 2: Try Pipeline-First Execution (NEW!)
+            # Get full pipeline from capability planner for multi-step execution
+            pipeline_skills = await self._get_skill_pipeline(goal_snapshot, requirements)
+            
+            if pipeline_skills and len(pipeline_skills) > 1:
+                # PIPELINE EXECUTION: Execute multiple skills in sequence
+                trace["pipeline_mode"] = True
+                trace["pipeline_length"] = len(pipeline_skills)
+                logger.info("pipeline_execution_started", skills_count=len(pipeline_skills))
+                
+                pipeline_result = await self._execute_pipeline(
+                    uow, goal, pipeline_skills, goal_snapshot, trace
+                )
+                
+                if pipeline_result:
+                    return pipeline_result
+            
+            # SINGLE SKILL FALLBACK: If no pipeline, execute single skill
             skill = await self._select_skill_with_performance(
                 requirements,
                 goal_snapshot,
@@ -1287,6 +1923,8 @@ class GoalExecutorV2:
                     "status": "error",
                     "message": f"No suitable skill found for requirements: {requirements}"
                 }
+            
+            trace["pipeline_mode"] = False
 
             # Record skill selection in trace
             skill_id_normalized = normalize_skill_id(skill)
