@@ -1022,57 +1022,57 @@ class GoalExecutorV2:
 
     async def _find_pattern_pipeline(self, goal_title: str, goal_description: str = "") -> list:
         """
-        CRITICAL: Find BEST matching pattern using ENHANCED capability-based matching.
+        CRITICAL: Plan execution using Capability Graph Planner.
         
-        Two-stage matching:
-        1. Infer capabilities from goal
-        2. Find patterns matching those capabilities
+        Instead of matching patterns, we now PLAN using capability dependencies.
         
-        This enables generalization - different goals map to same patterns.
+        Architecture:
+        Goal → Capabilities → Graph Expansion → Ordered Plan → Skill Binding
         
         Returns:
-            List of skill instances (or empty list if no good match)
+            List of skill instances (or empty list if no good plan)
         """
         global skill_registry
         
         try:
-            from semantic.enhanced_matcher import enhanced_matcher
+            from semantic.capability_planner import capability_planner
             
-            result = await enhanced_matcher.find_best_pattern(
+            plan_result = capability_planner.plan(
                 goal_title=goal_title,
                 goal_description=goal_description
             )
             
-            if result:
-                confidence = result.get("confidence", "low")
-                skill_sequence = result.get("skill_sequence", [])
-                capabilities = result.get("capabilities", [])
-                
-                skills = []
+            skills = []
+            skill_sequence = plan_result.get("skills", [])
+            confidence = plan_result.get("confidence", 0.0)
+            plan = plan_result.get("plan", [])
+            primary = plan_result.get("primary", [])
+            
+            if confidence >= 0.5 and skill_sequence:
                 for skill_id in skill_sequence:
                     if isinstance(skill_id, str):
                         skill = skill_registry.get(skill_id)
                         if skill:
                             skills.append(skill)
                 
-                if confidence in ("high", "medium") and len(skills) >= 2:
+                if skills:
                     logger.info(
-                        "capability_pattern_matched",
-                        pattern_id=result["pattern_id"],
+                        "capability_plan_created",
                         confidence=confidence,
-                        capabilities=capabilities[:3],
+                        plan=plan,
+                        primary=primary,
                         skills=[normalize_skill_id(s) for s in skills]
                     )
                     return skills
             
-            logger.info("no_capability_match_using_planner")
+            logger.info("low_confidence_plan_fallback")
             return []
                 
         except ImportError as e:
-            logger.warning("enhanced_matcher_not_available", error=str(e))
+            logger.warning("capability_planner_not_available", error=str(e))
             return []
         except Exception as e:
-            logger.warning("capability_match_failed", error=str(e))
+            logger.warning("capability_plan_failed", error=str(e))
             return []
 
     async def _get_skill_pipeline(self, goal_snapshot: dict, requirements: dict) -> list:
