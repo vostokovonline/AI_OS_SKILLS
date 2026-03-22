@@ -1,22 +1,23 @@
-# AI-OS - Goal Execution System v3.0
+# AI-OS - Self-Improving Goal Execution System v3.0
 
-**Autonomous goal-execution system powered by AI agents**
+**Autonomous goal-execution system powered by AI agents with semantic memory**
 
-AI-OS is a sophisticated multi-level goal management system that decomposes high-level goals into atomic subgoals, executes them through specialized AI agents, and produces verifiable artifacts.
+AI-OS is a sophisticated multi-level goal management system that decomposes high-level goals into atomic subgoals, executes them through specialized AI agents, and learns from execution patterns for continuous improvement.
 
 ## 🏗️ Architecture
 
 ### Core Services
 
-- **ns_core** (port 8000) - FastAPI service: goal management, execution API
-- **ns_core_worker** - Celery worker for async task processing
-- **ns_postgres** (5432) - PostgreSQL database with audit trail
-- **ns_redis** (6379) - Redis for Celery + caching
-- **ns_litellm** (4000) - LLM proxy/router (Groq, Ollama, OpenAI, etc.)
-- **ns_memory** (8001) - Memory service with Neo4j + Milvus (vector DB)
-- **ns_dashboard** (8501) - Streamlit dashboard v1
-- **dashboard_v2** (3000) - React dashboard v2 (operational thinking interface)
-- **Temporal.io** (8088 UI, 7233 server) - Workflow orchestration for continuous goals
+| Service | Port | Purpose |
+|---------|------|---------|
+| ns_core | 8000 | FastAPI: goal management, execution API |
+| ns_core_worker | - | Celery worker for async tasks |
+| ns_postgres | 5432 | PostgreSQL with audit trail |
+| ns_redis | 6379 | Redis for Celery + caching |
+| ns_litellm | 4000 | LLM proxy (Groq, Ollama, OpenAI) |
+| ns_memory | 8001 | Neo4j + Milvus for memory |
+| dashboard_v2 | 3000 | React dashboard |
+| Temporal.io | 8088 | Continuous goal workflows |
 
 ### Goal System v3.0
 
@@ -25,258 +26,289 @@ Mission (L0) → Strategic (L1) → Operational (L2) → Tactical/Atomic (L3)
 ```
 
 **Key Features:**
-- **Unit of Work Pattern** - Transaction management with atomic operations
-- **Goal State Transitions** - All state changes through `transition_goal()` service
-- **Audit Trail** - Every transition logged to `goal_status_transitions` table
-- **Hard Invariants** - Business rules enforced at domain layer
-- **Goal Types**: achievable, continuous, directional, exploratory, meta
-- **Goal Contracts** - Formalized constraints on LLM behavior
-- **Artifact Layer** - Verifiable results from atomic goals
-- **Skill Manifests** - Explicit contracts for all skills
+- **Semantic Memory**: Pattern-based execution with embeddings
+- **Unit of Work Pattern**: Transaction management with atomic operations
+- **Goal State Transitions**: All state changes through `transition_goal()`
+- **Audit Trail**: Every transition logged
+- **Belief Model v1.0**: Epistemic state with support/confidence
+- **Decision Engine v4.0**: Arbitration, regret analysis, safe auto-tuning
+
+## 🧠 Semantic Memory System
+
+### How It Works
+
+```
+Goal Input
+    ↓
+Semantic Embedding (all-MiniLM-L6-v2, 384 dims)
+    ↓
+Pattern Matching (cosine similarity)
+    ↓
+Graduated Confidence Scoring
+    ↓
+Skill Pipeline Selection
+    ↓
+Execution → Learning → Pattern Storage
+```
+
+### Graduated Matching Confidence
+
+| Confidence | Similarity | Action |
+|------------|------------|--------|
+| HIGH | ≥ 0.5 | Use pattern directly |
+| MEDIUM | 0.3 - 0.5 | Validate with planner |
+| LOW | < 0.3 | Use planner only |
+
+### Scoring Formula
+
+```
+score = semantic_similarity × 0.7 + success_rate × 0.2 + frequency × 0.1
+```
+
+### Example
+
+**Goal**: "summarize latest AI articles"
+
+**Matched Pattern**: `["core.web_research", "core.summarize_text"]`
+
+**Scores**:
+- Semantic similarity: 0.42
+- Success rate: 0.85
+- Frequency: 3
+- **Total: 0.50** → MEDIUM confidence
+
+## 🔄 Evolution Loop
+
+```
+┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+│  Execute    │───▶│   Learn     │───▶│   Match     │
+│  Pipeline   │    │   Pattern   │    │   Next      │
+└─────────────┘    └─────────────┘    └─────────────┘
+      │                                    │
+      └────────────────────────────────────┘
+                      │
+              Pattern Storage (PostgreSQL)
+```
+
+### Pattern Structure
+
+```sql
+CREATE TABLE skill_patterns (
+    id UUID PRIMARY KEY,
+    pattern_id TEXT UNIQUE,
+    skill_sequence JSONB,      -- ["core.web_research", "core.summarize_text"]
+    frequency INTEGER,
+    avg_success_rate FLOAT,
+    embedding JSONB,           -- 384-dim vector
+    goal_text TEXT,
+    discovered_at TIMESTAMP,
+    last_seen_at TIMESTAMP
+);
+```
 
 ## 🚀 Quick Start
-
-### Prerequisites
-
-- Docker & Docker Compose
-- Python 3.11+
-- API Keys for LLM providers (Groq, OpenAI, etc.)
 
 ### Installation
 
 ```bash
 # Clone repository
-git clone https://github.com/YOUR_USERNAME/ai-os.git
-cd ai-os
+git clone https://github.com/onor/ai-os-final.git
+cd ai-os-final
 
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your API keys
-nano .env
-
-# Start all services
+# Start services
 docker-compose up -d
 
 # Check status
 make status
 ```
 
-### First Goal
+### Create and Execute Goal
 
 ```bash
-# Create a simple atomic goal
+# Create atomic goal
 curl -X POST http://localhost:8000/goals/create \
   -H "Content-Type: application/json" \
   -d '{
-    "title": "Test goal",
-    "description": "Testing AI-OS",
+    "title": "Research latest AI news",
+    "description": "Find and summarize recent AI articles",
     "goal_type": "achievable",
     "is_atomic": true
   }'
 
 # Execute goal
 curl -X POST http://localhost:8000/goals/{goal_id}/execute
-
-# Check status
-curl http://localhost:8000/goals/{goal_id}
 ```
 
-## 📊 API Documentation
+### Dashboard
 
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+- **URL**: http://localhost:3000
+- **Features**: Goal graph, timeline, dependency tree, autonomy panel
 
-### Key Endpoints
+## 📊 Monitoring
 
-```
-POST /goals/create                    # Create new goal
-POST /goals/{goal_id}/execute         # Execute atomic goal
-POST /goals/{goal_id}/decompose       # Decompose into subgoals
-POST /goals/{goal_id}/strict_evaluate # Strict evaluation
-POST /goals/{goal_id}/reflect         # Generate next goals
-GET  /goals/{goal_id}/tree            # Goal hierarchy
-GET  /goals/list                      # List all goals
-GET  /goals/stats                     # Statistics
-```
+### Logs
 
-## 🎯 Goal System Architecture
+```bash
+# Core service logs
+make logs
 
-### Goal Lifecycle
-
-```
-create → classify → decompose → execute → strict_evaluate → reflect → extract_patterns
+# Worker logs
+make logs-worker
 ```
 
-### State Transitions (via UnitOfWork)
+### Database
 
-All state transitions go through `transition_goal()`:
+```bash
+# PostgreSQL shell
+make db-shell
+
+# Check patterns
+psql> SELECT pattern_id, skill_sequence, frequency FROM skill_patterns;
+
+# Check embeddings
+psql> SELECT pattern_id, embedding IS NOT NULL as has_emb FROM skill_patterns;
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/goals/create` | POST | Create new goal |
+| `/goals/{id}/execute` | POST | Execute goal |
+| `/goals/list` | GET | List all goals |
+| `/llm/status` | GET | Check LLM status |
+| `/memory/stats` | GET | Memory statistics |
+
+## 🔧 Configuration
+
+### Environment Variables
+
+```bash
+# Database
+POSTGRES_USER=ns_admin
+POSTGRES_PASSWORD=your_password
+POSTGRES_DB=ns_core_db
+
+# LLM
+LLM_MODEL=cloud-reasoner
+FALLBACK_MODEL=ollama/qwen2.5-coder:latest
+GROQ_COOLDOWN_HOURS=6
+
+# Semantic Matching
+SEMANTIC_MODEL=all-MiniLM-L6-v2
+MIN_SEMANTIC_SIMILARITY=0.35
+MIN_SCORE_THRESHOLD=0.35
+```
+
+### Matcher Configuration
+
+Located in `services/core/semantic/matcher.py`:
 
 ```python
-from goal_transition_service import transition_goal
-from infrastructure.uow import UnitOfWork
+class SemanticMatcher:
+    HIGH_CONFIDENCE = 0.5    # Direct use
+    MEDIUM_CONFIDENCE = 0.3  # Validate with planner
+    MIN_SCORE_THRESHOLD = 0.35
+    MAX_PATTERNS_TO_CHECK = 50
+```
 
-async with uow_factory() as uow:
-    result = await transition_goal(
-        uow=uow,
-        goal_id=goal.id,
-        new_state="done",
-        reason="Goal completed successfully",
-        actor="goal_executor"
+## 🧪 Testing
+
+```bash
+# Unit tests
+make test-unit
+
+# Integration tests  
+make test-e2e
+
+# All tests
+make test-all
+```
+
+### Manual Pattern Testing
+
+```python
+# Test semantic matching
+docker exec ns_core python -c "
+import asyncio
+from semantic.matcher import semantic_matcher
+
+async def test():
+    result = await semantic_matcher.find_best_pattern(
+        'summarize latest AI articles',
+        'find and summarize recent AI news'
     )
+    return result
+
+result = asyncio.run(test())
+print(f'Skills: {result[\"skill_sequence\"]}')
+print(f'Score: {result[\"score\"]}')
+print(f'Confidence: {result[\"confidence\"]}')
+"
 ```
 
-### Audit Trail
+## 📈 Performance
 
-Every transition is logged to `goal_status_transitions` table:
+### Benchmarks
 
-```sql
-SELECT * FROM goal_status_transitions
-WHERE goal_id = 'your-goal-id'
-ORDER BY created_at DESC;
-```
+| Operation | Latency |
+|------------|----------|
+| Embedding generation | ~30ms |
+| Pattern matching (50 patterns) | ~100ms |
+| Full goal execution | 5-30s |
 
-### Hard Invariants
+### Optimization Tips
 
-The system enforces business rules at the domain layer:
+1. **Limit pattern checks**: `MAX_PATTERNS_TO_CHECK = 50`
+2. **Cache embeddings**: SentenceTransformer loaded once
+3. **Filter by success rate**: `WHERE avg_success_rate >= 0.6`
+4. **pgvector**: Native vector similarity in SQL (planned)
 
-1. **No direct status assignments** - All changes through `transition_goal()`
-2. **Terminal state protection** - Cannot exit from done/frozen/permanent
-3. **Goal type constraints** - Continuous/directional goals cannot be "done"
-4. **Artifact requirement** - Atomic goals require passed artifacts
-5. **Parent-child consistency** - Cannot complete parent with active children
-
-## 🤖 Agent Graph (LangGraph)
-
-Multi-agent system with role-based model selection:
-
-- **SUPERVISOR** (qwen3-coder) - Routes tasks
-- **CODER** (qwen3-coder) - Code generation
-- **PM** (gpt-oss) - Goal management
-- **RESEARCHER** (qwen3-coder) - Information gathering
-- **INTELLIGENCE** (deepseek-v3.1) - Complex reasoning
-
-## 🔄 Continuous Goals (Temporal.io)
-
-Long-running goals managed by Temporal.io workflows:
-
-```bash
-# Start continuous goal
-curl -X POST http://localhost:8000/goals/continuous/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "title": "Weekly system optimization",
-    "description": "Optimize every Monday",
-    "cron_schedule": "0 9 * * 1"
-  }'
-
-# Temporal Web UI
-open http://localhost:8088
-```
-
-## 🛠️ Development
-
-### Commands
-
-```bash
-make deploy-fast      # Fast deploy (~5s)
-make deploy           # Full deploy with cache clear
-make status           # Container status
-make logs             # ns_core logs
-make logs-worker      # Worker logs
-make db-shell         # PostgreSQL shell
-make test-goal        # Create test goal
-```
-
-### File Structure
+## 📁 Project Structure
 
 ```
-services/core/
-├── domain/              # Domain layer (business logic)
-│   └── goal_domain_service.py
-├── infrastructure/      # Infrastructure layer (UoW, repositories)
-│   └── uow.py
-├── agents/             # LangGraph agents
-├── canonical_skills/   # Built-in skills
-├── goal_executor.py    # Goal execution (v1)
-├── goal_executor_v2.py # Goal execution with UoW
-├── goal_decomposer.py  # Goal decomposition
-├── goal_transition_service.py  # State transitions
-├── audit_logger_v2.py  # Audit trail
-└── main.py             # FastAPI app
+/home/onor/ai_os_final/
+├── services/
+│   ├── core/
+│   │   ├── main.py                 # FastAPI endpoints
+│   │   ├── goal_executor_v2.py     # Execution engine
+│   │   ├── semantic/
+│   │   │   ├── embedding_service.py # Embedding generation
+│   │   │   └── matcher.py          # Pattern matching
+│   │   ├── canonical_skills/       # Built-in skills
+│   │   └── models.py               # Database models
+│   └── dashboard_v2/               # React dashboard
+├── tests/
+│   ├── unit/
+│   └── integration/
+└── Makefile
 ```
 
-### Adding New Skills
+## 🔮 Roadmap
 
-1. Create skill in `services/core/canonical_skills/`
-2. Implement `SkillResult` return type
-3. Register in `mvp_skills.py` or `production_skills.py`
-4. Deploy with `make deploy-fast`
-
-### Testing
-
-```bash
-# System tests
-./services/core/test_goals.sh
-
-# Browser skills
-python3 services/core/skills/browser/test_basics.py
-```
-
-## 📈 Monitoring
-
-### Health Checks
-
-```bash
-# API health
-curl http://localhost:8000/docs
-
-# Container status
-docker ps
-
-# Database stats
-docker exec ns_postgres psql -U ns_admin -d ns_core_db -c "SELECT COUNT(*) FROM goals;"
-```
-
-### Audit Trail
-
-```sql
--- Recent transitions
-SELECT created_at, to_status, triggered_by, reason
-FROM goal_status_transitions
-ORDER BY created_at DESC
-LIMIT 20;
-
--- Goal statistics
-SELECT status, COUNT(*) FROM goals GROUP BY status;
-```
-
-## 🔐 Security
-
-**IMPORTANT:**
-- Never commit `.env` file (contains API keys)
-- Use `.env.example` as template
-- Rotate credentials regularly
-- Review audit logs for suspicious activity
-
-## 📝 License
-
-MIT License - See LICENSE file
+- [ ] **pgvector Integration**: Native vector similarity in SQL
+- [ ] **Pattern Clustering**: Auto-group similar patterns
+- [ ] **Knowledge Graph**: Neo4j for pattern relationships
+- [ ] **Federated Learning**: Share patterns across instances
+- [ ] **Auto-Tuning**: ML-based threshold optimization
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open Pull Request
+1. Fork repository
+2. Create feature branch
+3. Implement changes
+4. Add tests
+5. Submit PR
 
-## 📧 Support
+## 📄 License
 
-For issues and questions:
-- GitHub Issues: https://github.com/YOUR_USERNAME/ai-os/issues
-- Documentation: http://localhost:8000/docs
+MIT License
 
----
+## 🙏 Built With
 
-**Built with ❤️ using FastAPI, LangGraph, Temporal.io, and Docker**
+- [FastAPI](https://fastapi.tiangolo.com/) - Backend framework
+- [LangGraph](https://langchain-ai.github.io/langgraph/) - Agent orchestration
+- [PostgreSQL](https://www.postgresql.org/) - Database
+- [Redis](https://redis.io/) - Caching & queues
+- [SentenceTransformers](https://www.sbert.net/) - Embeddings
+- [React](https://react.dev/) - Dashboard UI
