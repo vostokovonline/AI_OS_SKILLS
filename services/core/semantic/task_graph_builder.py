@@ -234,33 +234,46 @@ class TaskGraphBuilder:
             Output: [fetch_A, fetch_B, fetch_C] in parallel
         """
         expanded = []
+        task_id_map = {}  # Maps original task_id -> list of expanded task_ids
         
+        # First pass: expand parallel tasks
         for task in tasks:
             if task.parallel_key:
-                # Expand into entity-specific tasks
+                # This task needs to be expanded for each entity
                 for entity in entities:
                     entity_task = Task(
                         id=f"{task.id}_{entity}",
                         description=f"{task.description} for {entity}",
                         outputs=[f"{o}_{entity}" for o in task.outputs],
-                        depends_on=task.depends_on,
+                        depends_on=task.depends_on,  # Will be fixed in second pass
                         parallel_key=task.parallel_key
                     )
                     expanded.append(entity_task)
+                    if task.id not in task_id_map:
+                        task_id_map[task.id] = []
+                    task_id_map[task.id].append(entity_task.id)
             else:
-                # Keep as-is, update dependencies
-                new_deps = []
-                for dep in task.depends_on:
-                    # Point to the last expanded task of dependency
-                    if expanded and expanded[-1].id.startswith(dep):
-                        new_deps.append(f"{dep}_{entities[-1]}")
-                    else:
-                        new_deps.append(dep)
-                
-                task.depends_on = new_deps if new_deps else task.depends_on
+                # Keep non-parallel tasks
                 expanded.append(task)
+                if task.id not in task_id_map:
+                    task_id_map[task.id] = []
+                task_id_map[task.id].append(task.id)
         
-        return expanded
+        # Second pass: fix dependencies to point to expanded tasks
+        final_tasks = []
+        for task in expanded:
+            new_depends = []
+            for dep in task.depends_on:
+                if dep in task_id_map:
+                    # Point to last expanded task of the dependency
+                    new_depends.append(task_id_map[dep][-1])
+                else:
+                    # Keep original dependency (for non-parallel deps)
+                    new_depends.append(dep)
+            task.depends_on = new_depends
+            final_tasks.append(task)
+        
+        return final_tasks
     
     def _build_custom_tasks(self, text: str, task_type: str) -> List[Task]:
         """Build custom tasks when no template matches."""
