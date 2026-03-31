@@ -7,7 +7,7 @@ Key fixes over v6:
 3. Confidence BONUS instead of penalty (exploitation = good)
 4. Failure insights → planner constraints (adaptive replanning)
 """
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 from typing import Dict as TypeDict
 from dataclasses import dataclass, field
 import time
@@ -195,12 +195,23 @@ class PlanMemory:
     UNCERTAINTY_BONUS = 0.4
     UCB_EXPLORATION_CONST = 1.4
     
-    COMMIT_THRESHOLD = 3
-    UNLOCK_FAILURES = 2
-    PROBE_ATTEMPTS = 3
+    # Mode control (explore/probe/exploit)
     DECAY_HISTORY = 5
     DECAY_THRESHOLD = 0.6
+    PROBE_ATTEMPTS = 3
+    
+    # Thompson Sampling parameters
     DECAY_TAU_ITERATIONS = 10  # Time constant for decay
+    RECENCY_WEIGHT = 0.3  # Weight for recency in final score
+    
+    # Forced re-exploration (coverage guarantee)
+    REEXPLORE_ITERATIONS = 20  # Force re-check strategy after N iterations (reduced for testing)
+    REEXPLORE_PROBABILITY = 0.3  # Probability to recheck if overdue
+    
+    # Artifact system
+    ARTIFACT_TTL_SECONDS = 300  # 5 minutes TTL
+    ARTIFACT_MAX_SIZE = 1000  # Max artifacts in store
+    ARTIFACT_MIN_SUCCESS_RATE = 0.5  # Only cache if success rate > 50%
     
     def __init__(self, storage_path: str = "/app/plan_memory.json"):
         self.plans: List[StoredPlan] = []
@@ -208,7 +219,6 @@ class PlanMemory:
         self._cache: Dict[str, List[float]] = {}
         self._storage_path = storage_path
         self._strategy_scores: Dict[str, Dict[str, Any]] = {}
-        # Structure: {"success": int, "fail": int, "success_times": [timestamps], "fail_times": [timestamps]}
         
         self._mode = "explore"
         self._probe_candidate: Optional[str] = None
@@ -217,8 +227,14 @@ class PlanMemory:
         self._locked_strategy: Optional[str] = None
         
         self._exploit_history: List[bool] = []
-        self._iteration_count = 0  # Logical clock (not real time) - ensures consistent behavior
-        self._total_experience_cache: int = 0  # Cached sum of all total_trials (O(1) lookup)
+        self._iteration_count = 0
+        self._total_experience_cache: int = 0
+        
+        # Context bandit: track last seen iteration per (goal_type, strategy)
+        self._last_seen: Dict[Tuple[str, str], int] = {}
+        
+        # Artifact system
+        self._artifacts: Dict[str, Dict[str, Any] ] = {}  # key -> {value, strategy, timestamp, success, usage_count}
         
         self._load()
         self._load_blacklist()
@@ -322,18 +338,33 @@ class PlanMemory:
                 self._mode = "explore"
                 self._locked_strategy = None
         
-        # Thompson Sampling: sample from Beta for each strategy
+        # Thompson Sampling with Recency + Forced Re-exploration
         import random
         best_strategy = strategies[0] if strategies else "unknown"
-        best_sample = -1.0
+        best_score = -1.0
         
         for s in strategies:
-            # Get Thompson sample
-            sample = self._get_thompson_sample(s)
+            # FORCED RE-EXPLORATION: Check if strategy needs re-check
+            if self._should_force_rexplore(s):
+                print(f"[REXPLORE] Forcing re-check of {s}")
+                return s
             
-            if sample > best_sample:
-                best_sample = sample
+            # Get Thompson sample
+            ts_sample = self._get_thompson_sample(s)
+            
+            # RECENCY BOOST: Give slight boost to recent strategies
+            key = ("default", s)
+            last_seen = self._last_seen.get(key, 0)
+            recency = 1.0 + self.RECENCY_WEIGHT * (1.0 - min(1.0, (self._iteration_count - last_seen) / 50))
+            
+            final_score = ts_sample * recency
+            
+            if final_score > best_score:
+                best_score = final_score
                 best_strategy = s
+        
+        # Track selection for re-exploration tracking
+        self._last_seen[("default", best_strategy)] = self._iteration_count
         
         return best_strategy
     
@@ -525,10 +556,85 @@ class PlanMemory:
         # Store CURRENT iteration (clock already ticked in select_strategy)
         self._strategy_scores[strategy]["fail_times"].append(self._iteration_count)
         
+        # Track last seen for forced re-exploration
+        self._last_seen[(strategy, strategy)] = self._iteration_count
+        
         # Keep only last MAX_HISTORY_SIZE for decay calculation
         if len(self._strategy_scores[strategy]["fail_times"]) > self.MAX_HISTORY_SIZE:
             self._strategy_scores[strategy]["fail_times"] = \
                 self._strategy_scores[strategy]["fail_times"][-self.MAX_HISTORY_SIZE:]
+    
+    # ========================================================================
+    # FORCED RE-EXPLORATION (Coverage Guarantee)
+    # ========================================================================
+    
+    def _should_force_rexplore(self, strategy: str) -> bool:
+        """Check if strategy should be forced re-explored due to age"""
+        key = ("default", strategy)  # Using "default" as goal_type for now
+        last_seen = self._last_seen.get(key, 0)
+        age = self._iteration_count - last_seen
+        
+        if age > self.REEXPLORE_ITERATIONS:
+            return random.random() < self.REEXPLORE_PROBABILITY
+        return False
+    
+    # ========================================================================
+    # ARTIFACT SYSTEM
+    # ========================================================================
+    
+    def get_artifact(self, goal_type: str, input_key: str) -> Optional[Dict]:
+        """Get cached artifact if valid"""
+        key = f"{goal_type}:{input_key}"
+        artifact = self._artifacts.get(key)
+        
+        if not artifact:
+            return None
+        
+        import time
+        age = time.time() - artifact.get("timestamp", 0)
+        
+        # Check TTL
+        if age > self.ARTIFACT_TTL_SECONDS:
+            del self._artifacts[key]
+            return None
+        
+        # Check success rate
+        if artifact.get("success_count", 0) / max(artifact.get("usage_count", 1), 1) < self.ARTIFACT_MIN_SUCCESS_RATE:
+            return None
+        
+        artifact["usage_count"] = artifact.get("usage_count", 0) + 1
+        return artifact
+    
+    def store_artifact(self, goal_type: str, input_key: str, result: Any, strategy: str, success: bool) -> None:
+        """Store result as artifact if worth caching"""
+        if not success:
+            return  # Don't cache failures
+        
+        key = f"{goal_type}:{input_key}"
+        
+        # Initialize or update
+        if key not in self._artifacts:
+            self._artifacts[key] = {
+                "value": result,
+                "strategy": strategy,
+                "timestamp": 0,
+                "success_count": 0,
+                "usage_count": 0
+            }
+        
+        artifact = self._artifacts[key]
+        import time
+        artifact["timestamp"] = time.time()
+        artifact["strategy"] = strategy
+        artifact["success_count"] = artifact.get("success_count", 0) + 1
+        artifact["value"] = result
+        
+        # Enforce max size (LRU-like eviction)
+        if len(self._artifacts) > self.ARTIFACT_MAX_SIZE:
+            # Remove oldest
+            oldest_key = min(self._artifacts.keys(), 
+                           key=lambda k: self._artifacts[k].get("timestamp", 0))
+            del self._artifacts[oldest_key]
     
     def get_strategy_stats(self, strategy: str) -> Dict[str, int]:
         """Get success/fail counts for strategy"""
