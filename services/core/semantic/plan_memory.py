@@ -304,8 +304,7 @@ class PlanMemory:
     RECOVERY_BOOST = 0.3  # Boost for strategies that previously failed but might recover
 
     def select_strategy(self, strategies: List[str]) -> str:
-        # CRITICAL: Clock ticks on EVERY selection, not just on record
-        # This ensures consistent decay for all strategies
+        # Thompson Sampling core: tick clock once per selection
         self._iteration_count += 1
         
         # PROBE MODE: Locked to single candidate - NO exploration allowed
@@ -313,16 +312,9 @@ class PlanMemory:
             print(f"[PROBE] Probing: {self._probe_candidate}")
             return self._probe_candidate
         
-        # EXPLOIT MODE: Can explore with ε probability
+        # EXPLOIT MODE: Use Thompson Sampling (natural exploration via distribution)
         if self._mode == "exploit" and self._locked_strategy:
             if self._locked_strategy in strategies:
-                # ε-exploration: 20% chance to try RANDOM other strategy
-                # This allows finding BETTER strategies even if current works
-                if random.random() < self.EPSILON:
-                    print(f"[EXPLOIT] ε-exploration: trying random strategy")
-                    available = [s for s in strategies if s != self._locked_strategy]
-                    if available:
-                        return random.choice(available)  # type: ignore
                 print(f"[EXPLOIT] Using locked: {self._locked_strategy}")
                 return self._locked_strategy
             else:
@@ -330,20 +322,41 @@ class PlanMemory:
                 self._mode = "explore"
                 self._locked_strategy = None
         
-        if self._mode == "probe" and self._probe_candidate:
-            print(f"[PROBE] Probing candidate: {self._probe_candidate}")
-            return self._probe_candidate
-        
-        best_score = -float('inf')
+        # Thompson Sampling: sample from Beta for each strategy
+        import random
         best_strategy = strategies[0] if strategies else "unknown"
+        best_sample = -1.0
         
         for s in strategies:
-            score = self.get_ucb_score(s)
-            if score > best_score:
-                best_score = score
+            # Get Thompson sample
+            sample = self._get_thompson_sample(s)
+            
+            if sample > best_sample:
+                best_sample = sample
                 best_strategy = s
         
         return best_strategy
+    
+    def _get_thompson_sample(self, strategy: str) -> float:
+        """Pure Thompson Sampling: sample from Beta distribution"""
+        import random
+        
+        if strategy not in self._strategy_scores:
+            # New strategy: uniform prior - will explore naturally
+            return random.betavariate(1.0, 1.0)
+        
+        weighted_s, weighted_f, total_trials = self._get_weighted_counts(strategy)
+        
+        # Prior that fades with experience
+        prior_scale = 2.0 / (2.0 + total_trials)
+        
+        alpha = weighted_s + prior_scale
+        beta = weighted_f + prior_scale
+        
+        try:
+            return random.betavariate(alpha, beta)
+        except (ValueError, ZeroDivisionError):
+            return 0.5
     
     def get_strategy_score(self, strategy: str) -> float:
         """Calculate score using weighted Beta distribution with time decay"""
@@ -364,48 +377,10 @@ class PlanMemory:
             total += stats["success"] + stats["fail"]
         return total
     
-    def get_ucb_score(self, strategy: str) -> float:
-        """
-        Thompson Sampling: Sample from Beta distribution.
-        
-        score = sample_from_Beta(alpha, beta)
-        
-        Where:
-        - alpha = weighted_success + prior
-        - beta = weighted_fail + prior
-        
-        This naturally balances exploration vs exploitation:
-        - Unknown strategies: wide distribution → more exploration
-        - Known good strategies: narrow distribution → more exploitation
-        """
-        import random
-        import math
-        
-        if strategy not in self._strategy_scores:
-            return float('inf')
-        
-        # Get weighted counts with decay
-        weighted_s, weighted_f, total_trials = self._get_weighted_counts(strategy)
-        
-        if total_trials == 0:
-            return float('inf')
-        
-        # Scaled prior: stronger at start, fades with experience
-        prior_scale = 2.0 / (2.0 + total_trials)
-        
-        alpha = weighted_s + prior_scale
-        beta = weighted_f + prior_scale
-        
-        # Thompson Sampling: sample from Beta distribution
-        try:
-            sample = random.betavariate(alpha, beta)
-        except (ValueError, ZeroDivisionError):
-            # Fallback to mean if distribution fails
-            sample = weighted_s / (weighted_s + weighted_f) if (weighted_s + weighted_f) > 0 else 0.5
-        
-        return sample
+    # Old UCB methods removed - using pure Thompson Sampling now
+    # See _get_thompson_sample() for the sampling logic
     
-    def _get_commitment_multiplier(self, strategy: str) -> float:
+    def _get_weighted_counts(self, strategy: str) -> tuple:
         """
         Calculate commitment multiplier based on recent success rate.
         
