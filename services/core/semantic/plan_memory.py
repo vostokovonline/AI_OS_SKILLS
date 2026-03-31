@@ -239,8 +239,8 @@ class PlanMemory:
         return self._locked_strategy
     
     def _update_mode(self, strategy: str, success: bool) -> None:
-        # Increment iteration counter for time decay
-        self._iteration_count += 1
+        # Clock is already incremented in select_strategy
+        # Do NOT increment here - causes double tick
         
         if self._mode == "exploit" and strategy == self._locked_strategy:
             self._exploit_history.append(success)
@@ -366,48 +366,44 @@ class PlanMemory:
     
     def get_ucb_score(self, strategy: str) -> float:
         """
-        Calculate UCB (Upper Confidence Bound) score with commitment multiplier.
+        Thompson Sampling: Sample from Beta distribution.
         
-        UCB = weighted_mean_reward * commitment + c * sqrt(log(total_experience) / n_strategy)
+        score = sample_from_Beta(alpha, beta)
         
-        Key insight:
-        - weighted_mean_reward: adapts to changing environment (iteration-based decay)
-        - commitment: increases with recent success rate, helps stabilize on good strategies
-        - exploration_term: based on TOTAL_TRIALS (true experience, not bounded)
+        Where:
+        - alpha = weighted_success + prior
+        - beta = weighted_fail + prior
+        
+        This naturally balances exploration vs exploitation:
+        - Unknown strategies: wide distribution → more exploration
+        - Known good strategies: narrow distribution → more exploitation
         """
+        import random
         import math
         
         if strategy not in self._strategy_scores:
             return float('inf')
         
-        # Get weighted counts (for mean) AND total_trials (for exploration)
-        weighted_s, weighted_f, total_n = self._get_weighted_counts(strategy)
+        # Get weighted counts with decay
+        weighted_s, weighted_f, total_trials = self._get_weighted_counts(strategy)
         
-        if total_n == 0:
+        if total_trials == 0:
             return float('inf')
         
-        # Use cached total_experience (O(1) instead of O(K * history))
-        total_experience = self._total_experience_cache
+        # Scaled prior: stronger at start, fades with experience
+        prior_scale = 2.0 / (2.0 + total_trials)
         
-        if total_experience == 0:
-            return float('inf')
+        alpha = weighted_s + prior_scale
+        beta = weighted_f + prior_scale
         
-        # Weighted mean reward (adapts via iteration-based decay)
-        n = weighted_s + weighted_f
-        mean_reward = weighted_s / n if n > 0 else 0
+        # Thompson Sampling: sample from Beta distribution
+        try:
+            sample = random.betavariate(alpha, beta)
+        except (ValueError, ZeroDivisionError):
+            # Fallback to mean if distribution fails
+            sample = weighted_s / (weighted_s + weighted_f) if (weighted_s + weighted_f) > 0 else 0.5
         
-        # CRITICAL: Exploration term uses TOTAL_TRIALS (true experience)
-        # This preserves "inertia of trust" - more proven strategies are explored less
-        exploration_term = math.sqrt(math.log(total_experience + 1) / total_n)
-        
-        ucb = mean_reward + self.UCB_EXPLORATION_CONST * exploration_term
-        
-        # COMMITMENT MULTIPLIER: stabilize on strategies with recent success
-        # Only applies when we have history (prevents wild swings early on)
-        commitment_multiplier = self._get_commitment_multiplier(strategy)
-        final_score = ucb * commitment_multiplier
-        
-        return final_score
+        return sample
     
     def _get_commitment_multiplier(self, strategy: str) -> float:
         """
@@ -1364,10 +1360,14 @@ class PlanMemory:
                 print(f"[EXPLORATION] Trying blacklisted strategy: {strategy}")
             return {}
         
+        # Filter blacklist by goal and return strategy->cooldown mapping
         blacklisted = {}
-        for strategy, cooldown_until in self._blacklist.items():
-            if now <= cooldown_until:
-                blacklisted[strategy] = cooldown_until
+        for key, cooldown_until in self._blacklist.items():
+            # Key format is "goal:strategy"
+            if key.startswith(goal + ":"):
+                strategy = key[len(goal) + 1:]  # Extract strategy name
+                if now <= cooldown_until:
+                    blacklisted[strategy] = cooldown_until
         
         return blacklisted
     
