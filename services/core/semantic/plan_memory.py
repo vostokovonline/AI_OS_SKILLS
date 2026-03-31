@@ -304,6 +304,10 @@ class PlanMemory:
     RECOVERY_BOOST = 0.3  # Boost for strategies that previously failed but might recover
 
     def select_strategy(self, strategies: List[str]) -> str:
+        # CRITICAL: Clock ticks on EVERY selection, not just on record
+        # This ensures consistent decay for all strategies
+        self._iteration_count += 1
+        
         # PROBE MODE: Locked to single candidate - NO exploration allowed
         if self._mode == "probe" and self._probe_candidate:
             print(f"[PROBE] Probing: {self._probe_candidate}")
@@ -362,12 +366,13 @@ class PlanMemory:
     
     def get_ucb_score(self, strategy: str) -> float:
         """
-        Calculate UCB (Upper Confidence Bound) score.
+        Calculate UCB (Upper Confidence Bound) score with commitment multiplier.
         
-        UCB = weighted_mean_reward + c * sqrt(log(total_experience) / n_strategy)
+        UCB = weighted_mean_reward * commitment + c * sqrt(log(total_experience) / n_strategy)
         
         Key insight:
-        - weighted_mean_reward: adapts to changing environment (time-based decay)
+        - weighted_mean_reward: adapts to changing environment (iteration-based decay)
+        - commitment: increases with recent success rate, helps stabilize on good strategies
         - exploration_term: based on TOTAL_TRIALS (true experience, not bounded)
         """
         import math
@@ -387,7 +392,7 @@ class PlanMemory:
         if total_experience == 0:
             return float('inf')
         
-        # Weighted mean reward (adapts via time-based decay)
+        # Weighted mean reward (adapts via iteration-based decay)
         n = weighted_s + weighted_f
         mean_reward = weighted_s / n if n > 0 else 0
         
@@ -397,7 +402,63 @@ class PlanMemory:
         
         ucb = mean_reward + self.UCB_EXPLORATION_CONST * exploration_term
         
-        return ucb
+        # COMMITMENT MULTIPLIER: stabilize on strategies with recent success
+        # Only applies when we have history (prevents wild swings early on)
+        commitment_multiplier = self._get_commitment_multiplier(strategy)
+        final_score = ucb * commitment_multiplier
+        
+        return final_score
+    
+    def _get_commitment_multiplier(self, strategy: str) -> float:
+        """
+        Calculate commitment multiplier based on recent success rate.
+        
+        commitment = 1 + bonus * recent_success_rate
+        bonus = 0.3 (max 30% boost)
+        
+        This helps system "lock in" to good strategies instead of constantly exploring.
+        """
+        if strategy not in self._strategy_scores:
+            return 1.0
+        
+        stats = self._strategy_scores[strategy]
+        success_times = stats.get("success_times", [])
+        fail_times = stats.get("fail_times", [])
+        
+        # Need at least 3 trials for meaningful commitment
+        total = len(success_times) + len(fail_times)
+        if total < 3:
+            return 1.0
+        
+        # Calculate recent success rate (last 5 trials)
+        recent_k = 5
+        recent_successes = 0
+        recent_total = 0
+        
+        # Check recent successes (last K from combined history)
+        all_recent = []
+        for s in success_times[-recent_k:]:
+            all_recent.append((s, True))
+        for f in fail_times[-recent_k:]:
+            all_recent.append((f, False))
+        
+        all_recent.sort(reverse=True)  # Most recent first
+        
+        for _, is_success in all_recent:
+            recent_total += 1
+            if is_success:
+                recent_successes += 1
+        
+        if recent_total == 0:
+            return 1.0
+        
+        recent_rate = recent_successes / recent_total
+        
+        # Max 30% bonus when recent success rate is high
+        COMMITMENT_BONUS = 0.3
+        multiplier = 1.0 + COMMITMENT_BONUS * recent_rate
+        
+        return multiplier
     
     MAX_HISTORY_SIZE = 50  # Bounded memory - only keep last 50 events for decay calculation
     
@@ -445,12 +506,11 @@ class PlanMemory:
             weight = math.exp(-age / tau) if tau > 0 else 1.0
             weighted_fail += weight
         
-        # Add priors to prevent complete weight loss
-        # This gives "inertia of trust" to historically good strategies
-        PRIOR_ALPHA = 1.0
-        PRIOR_BETA = 1.0
-        weighted_success += PRIOR_ALPHA
-        weighted_fail += PRIOR_BETA
+        # Scale priors by experience: strong at first, fading with trials
+        # This prevents priors from dominating after many trials
+        prior_scale = 1.0 / (1.0 + total_trials)
+        weighted_success += prior_scale
+        weighted_fail += prior_scale
         
         return weighted_success, weighted_fail, total_trials
     
@@ -464,7 +524,7 @@ class PlanMemory:
         return 1.0 / (total_trials + 1)
     
     def record_strategy_success(self, strategy: str) -> None:
-        """Record successful execution of strategy (logical clock + bounded memory + total_trials)"""
+        """Record successful execution of strategy (logical clock already incremented in select)"""
         if strategy not in self._strategy_scores:
             self._strategy_scores[strategy] = {"success_times": [], "fail_times": [], "total_trials": 0}
         
@@ -473,8 +533,7 @@ class PlanMemory:
             self._strategy_scores[strategy].get("total_trials", 0) + 1
         self._total_experience_cache += 1
         
-        # Store ITERATION (logical clock), not timestamp
-        self._iteration_count += 1
+        # Store CURRENT iteration (clock already ticked in select_strategy)
         self._strategy_scores[strategy]["success_times"].append(self._iteration_count)
         
         # Keep only last MAX_HISTORY_SIZE for decay calculation
@@ -483,7 +542,7 @@ class PlanMemory:
                 self._strategy_scores[strategy]["success_times"][-self.MAX_HISTORY_SIZE:]
     
     def record_strategy_failure(self, strategy: str) -> None:
-        """Record failed execution of strategy (logical clock + bounded memory + total_trials)"""
+        """Record failed execution of strategy (logical clock already incremented in select)"""
         if strategy not in self._strategy_scores:
             self._strategy_scores[strategy] = {"success_times": [], "fail_times": [], "total_trials": 0}
         
@@ -492,8 +551,7 @@ class PlanMemory:
             self._strategy_scores[strategy].get("total_trials", 0) + 1
         self._total_experience_cache += 1
         
-        # Store ITERATION (logical clock), not timestamp
-        self._iteration_count += 1
+        # Store CURRENT iteration (clock already ticked in select_strategy)
         self._strategy_scores[strategy]["fail_times"].append(self._iteration_count)
         
         # Keep only last MAX_HISTORY_SIZE for decay calculation
