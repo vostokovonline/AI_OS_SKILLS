@@ -138,3 +138,24 @@ def run_cron_task(self, session_id, content):
     """Celery task for scheduled/cron execution"""
     logger.info("cron_task_started", session_id=session_id)
     return _run_async(_exec(session_id, HumanMessage(content=content)))
+
+
+@celery_app.task(bind=True)
+def decompose_goal_task(self, goal_id):
+    """
+    🔧 FIX: Celery task for auto-decomposition of non-atomic goals.
+    Called by:
+    1. goal_executor.create_goal_with_uow (auto-decompose on creation)
+    2. scheduler.stuck_goals_watchdog (self-healing)
+    3. Manual trigger from dashboard
+    """
+    from goal_decomposer import goal_decomposer
+
+    logger.info("decompose_task_started", goal_id=goal_id)
+    try:
+        result = _run_async(goal_decomposer.decompose_goal(goal_id))
+        logger.info("decompose_task_completed", goal_id=goal_id, children=len(result) if result else 0)
+        return {"goal_id": goal_id, "children_created": len(result) if result else 0}
+    except Exception as e:
+        logger.error("decompose_task_failed", goal_id=goal_id, error=str(e))
+        return {"goal_id": goal_id, "error": str(e)}

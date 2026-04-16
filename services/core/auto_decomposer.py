@@ -12,6 +12,7 @@ Date: 2026-02-11
 Severity: CRITICAL FIX
 """
 
+import json
 from typing import List, Dict
 from datetime import datetime, timedelta
 from sqlalchemy import select, func, and_
@@ -33,7 +34,7 @@ class AutoDecomposer:
     """
 
     def __init__(self):
-        self.stuck_threshold_hours = 1  # 1 hour in pending = trigger decompose
+        self.stuck_threshold_minutes = 5  # 5 minutes in pending = trigger decompose
 
     async def scan_and_decompose_stuck_goals(self) -> Dict:
         """
@@ -50,7 +51,7 @@ class AutoDecomposer:
         """
         async with AsyncSessionLocal() as db:
             # Находим pending non-atomic goals старше threshold
-            threshold_time = datetime.now() - timedelta(hours=self.stuck_threshold_hours)
+            threshold_time = datetime.now() - timedelta(minutes=self.stuck_threshold_minutes)
 
             stmt = select(Goal).where(
                 and_(
@@ -247,8 +248,8 @@ class AutoDecomposer:
 
 auto_decomposer = AutoDecomposer()
 
-# Confidence threshold for auto-decomposition
-DECOMPOSITION_CONFIDENCE_THRESHOLD = 0.7
+# Confidence threshold for auto-decomposition (lowered to allow more decompositions)
+DECOMPOSITION_CONFIDENCE_THRESHOLD = 0.5
 
 
 async def analyze_uncertainty(goal: Goal, subgoals: List[Dict]) -> Dict[str, float]:
@@ -431,7 +432,54 @@ async def create_decomposition_questions(goal: Goal, subgoals: List[Dict], db) -
         questions[0]["secondary_uncertainty"] = second_uncertainty
     
     await db.commit()
-    
+
+    # CRITICAL FIX: Sync questions to Redis so they appear in the dashboard
+    # The dashboard Questions page reads from Redis (pending_question:* keys)
+    # while this function writes to PostgreSQL (DecompositionSession/Question tables)
+    # We must sync to both systems!
+    try:
+        from redis import Redis
+        from datetime import timedelta
+
+        redis_client = Redis(host='redis', port=6379, db=0, decode_responses=True)
+
+        timeout_at = datetime.now() + timedelta(hours=24)
+
+        # Store question in Redis using the format expected by the dashboard
+        redis_data = {
+            "artifact_id": str(question.id),
+            "question_id": str(question.id),
+            "goal_id": str(goal.id),
+            "question": question.question_text,
+            "context": f"Uncertainty about {primary_uncertainty} (score: {uncertainty[primary_uncertainty]:.2f})",
+            "priority": "high" if uncertainty[primary_uncertainty] >= 0.7 else "normal",
+            "asked_at": datetime.now().isoformat(),
+            "timeout_at": timeout_at.isoformat(),
+            "timeout_action": "wait_longer",
+            "default_answer": "",
+            "status": "pending"
+        }
+
+        redis_key = f"pending_question:{goal.id}:{question.id}"
+        redis_client.set(redis_key, json.dumps(redis_data), ex=86400 * 3)  # 3 days TTL
+
+        # Also set a timeout key for the question
+        timeout_key = f"question_timeout:{question.id}"
+        redis_client.set(timeout_key, json.dumps({
+            "question_id": str(question.id),
+            "goal_id": str(goal.id),
+            "timeout_at": timeout_at.isoformat(),
+            "timeout_action": "wait_longer"
+        }), ex=86400 * 3)
+
+        logger.info("question_synced_to_redis",
+                    redis_key=redis_key,
+                    goal_id=str(goal.id),
+                    question_id=str(question.id))
+    except Exception as e:
+        logger.warning("redis_question_sync_failed", error=str(e))
+        # Don't fail the whole function if Redis sync fails - PostgreSQL is the source of truth
+
     # Send Telegram notification about questions
     try:
         from telegram_notifier import send_decomposition_notification

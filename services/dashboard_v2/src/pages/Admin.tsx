@@ -56,7 +56,8 @@ const Admin: React.FC = () => {
     try {
       // Load goals for pending approvals
       const goalsResponse = await apiClient.get('/goals/list');
-      const allGoals = goalsResponse.data.goals || [];
+      const goalsData = goalsResponse.data;
+      const allGoals = Array.isArray(goalsData) ? goalsData : (goalsData?.goals || []);
 
       // Filter for manual goals that might need approval
       const manualGoals = allGoals.filter((g: any) =>
@@ -82,16 +83,34 @@ const Admin: React.FC = () => {
         g.completion_mode === 'manual' && g.status === 'done'
       ).length;
 
+      // Load reflections from completed goals
+      const completedGoals = allGoals.filter((g: any) => g.status === 'completed' || g.status === 'done');
+      const reflectionsData: Reflection[] = completedGoals
+        .filter((g: any) => g.lessons_learned && g.lessons_learned.length > 0)
+        .map((g: any) => ({
+          id: g.id,
+          goal_id: g.id,
+          goal_title: g.title,
+          outcome: g.status === 'completed' ? 'success' : 'failure',
+          lessons_learned: Array.isArray(g.lessons_learned) ? g.lessons_learned : ['No lessons recorded'],
+          created_at: g.created_at || g.updated_at || new Date().toISOString()
+        }));
+
+      setReflections(reflectionsData);
+
+      // Calculate system health based on goal states
+      const totalGoals = allGoals.length;
+      const failedGoals = allGoals.filter((g: any) => g.status === 'failed').length;
+      const healthPercentage = totalGoals > 0
+        ? Math.round(((totalGoals - failedGoals) / totalGoals) * 100)
+        : 100;
+
       setStats({
         pending_approvals: pendingApprovalCount,
         completed_goals: doneCount,
         active_goals: activeCount,
-        system_health: 95 // Mock health metric
+        system_health: healthPercentage
       });
-
-      // For reflections, we'd need a dedicated API endpoint
-      // For now, show empty list
-      setReflections([]);
 
       setLoading(false);
     } catch (err: any) {
@@ -337,23 +356,47 @@ const Admin: React.FC = () => {
                   <Activity className="w-16 h-16 mx-auto mb-4 text-cyan-600" />
                   <h3 className="text-lg font-semibold text-gray-900 mb-2">System Observer</h3>
                   <p className="text-gray-500 mb-4">Real-time system monitoring</p>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-8">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mt-8">
                     <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500">CPU Usage</p>
-                      <p className="text-2xl font-bold text-gray-900">--%</p>
+                      <p className="text-sm text-gray-500">Total Goals</p>
+                      <p className="text-2xl font-bold text-gray-900">
+                        {stats ? (stats.active_goals + stats.completed_goals) : '--'}
+                      </p>
                     </div>
                     <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500">Memory</p>
-                      <p className="text-2xl font-bold text-gray-900">--%</p>
+                      <p className="text-sm text-gray-500">Active Goals</p>
+                      <p className="text-2xl font-bold text-blue-600">
+                        {stats?.active_goals ?? '--'}
+                      </p>
                     </div>
                     <div className="bg-gray-50 rounded-lg p-4">
-                      <p className="text-sm text-gray-500">Active Tasks</p>
-                      <p className="text-2xl font-bold text-gray-900">--</p>
+                      <p className="text-sm text-gray-500">Completed Goals</p>
+                      <p className="text-2xl font-bold text-green-600">
+                        {stats?.completed_goals ?? '--'}
+                      </p>
+                    </div>
+                    <div className="bg-gray-50 rounded-lg p-4">
+                      <p className="text-sm text-gray-500">System Health</p>
+                      <p className="text-2xl font-bold text-purple-600">
+                        {stats?.system_health ?? '--'}%
+                      </p>
                     </div>
                   </div>
-                  <p className="text-sm text-gray-400 mt-6">
-                    System observer metrics coming soon
-                  </p>
+                  {stats && stats.system_health >= 90 && (
+                    <p className="text-sm text-green-600 mt-6">
+                      ✓ System is operating normally
+                    </p>
+                  )}
+                  {stats && stats.system_health < 90 && stats.system_health >= 70 && (
+                    <p className="text-sm text-yellow-600 mt-6">
+                      ⚠ Some goals have failed - review recommended
+                    </p>
+                  )}
+                  {stats && stats.system_health < 70 && (
+                    <p className="text-sm text-red-600 mt-6">
+                      ✗ High failure rate - immediate attention required
+                    </p>
+                  )}
                 </div>
               </div>
             )}

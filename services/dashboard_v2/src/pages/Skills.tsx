@@ -18,9 +18,10 @@ export const Skills: React.FC = () => {
     try {
       setLoading(true);
       const data = await occpApi.getSkills();
-      setSkills(data);
+      setSkills(Array.isArray(data) ? data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load skills');
+      setSkills([]);
     } finally {
       setLoading(false);
     }

@@ -7,7 +7,7 @@ import { occpApi, Metric } from '../api/occpApi';
  */
 export const Observability: React.FC = () => {
   const [metrics, setMetrics] = useState<Metric[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [_, setLoading] = useState(true);
 
   useEffect(() => {
     loadMetrics();

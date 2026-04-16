@@ -16,7 +16,7 @@ import {
   InspectorContext,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 export class AOSClient {
   private client: AxiosInstance;
@@ -229,6 +229,14 @@ export class AOSClient {
   }
 
   /**
+   * Generic POST request for any endpoint
+   */
+  async post<T = any>(url: string, data?: any): Promise<T> {
+    const response = await this.client.post<T>(url, data);
+    return response.data;
+  }
+
+  /**
    * Update constraints
    */
   async updateConstraints(constraints: {
@@ -414,6 +422,88 @@ export class AOSClient {
    */
   async decomposeFromAnswers(sessionId: string): Promise<any> {
     const response = await this.client.post(`/decomposition/${sessionId}/decompose`);
+    return response.data;
+  }
+
+  // ========================================================================
+  // GOAL CREATION API
+  // ========================================================================
+
+  /**
+   * Create a new goal
+   */
+  async createGoal(req: {
+    title: string;
+    description?: string;
+    goal_type?: string;
+    is_atomic?: boolean;
+    domain?: string;
+    priority?: string;
+  }): Promise<any> {
+    const response = await this.client.post('/goals/create', req);
+    return response.data;
+  }
+
+  /**
+   * Execute a goal
+   */
+  async executeGoal(goalId: string): Promise<any> {
+    const response = await this.client.post(`/goals/${goalId}/execute`);
+    return response.data;
+  }
+
+  /**
+   * Get goal status
+   */
+  async getGoalStatus(goalId: string): Promise<any> {
+    const response = await this.client.get(`/goals/${goalId}/status`);
+    return response.data;
+  }
+
+  /**
+   * Mutate goal (update properties)
+   */
+  async mutateGoal(goalId: string, mutation: {
+    action: string;
+    params?: any;
+  }): Promise<any> {
+    const response = await this.client.post(`/goals/${goalId}/mutate`, mutation);
+    return response.data;
+  }
+
+  // ========================================================================
+  // SEMANTIC LAYER API (v7.x)
+  // ========================================================================
+
+  /**
+   * Get system metrics (observability)
+   */
+  async getSystemMetrics(): Promise<any> {
+    const response = await this.client.get('/metrics/system');
+    return response.data;
+  }
+
+  /**
+   * Get TS Router status
+   */
+  async getRouterStatus(): Promise<any> {
+    const response = await this.client.get('/semantic/router/status');
+    return response.data;
+  }
+
+  /**
+   * Get policy learning status
+   */
+  async getPolicyStatus(): Promise<any> {
+    const response = await this.client.get('/semantic/policy/status');
+    return response.data;
+  }
+
+  /**
+   * Set system goal (balanced, maximize_accuracy, low_latency, minimize_cost, reliable)
+   */
+  async setSystemGoal(goal: string): Promise<any> {
+    const response = await this.client.post('/semantic/goal/set', { goal });
     return response.data;
   }
 }

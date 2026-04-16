@@ -162,8 +162,8 @@ class ExecuteReadyGoalsUseCase:
         intents: list[ExecutionIntent] = []
 
         # Use READ-ONLY UoW for execution (hard guarantee)
-        from infrastructure.uow import get_uow
-        readonly_uow_factory = lambda: get_uow(read_only=True)
+        from infrastructure.uow import create_uow_provider
+        readonly_uow_factory = create_uow_provider()  # Use default provider
 
         async with readonly_uow_factory() as read_uow:
             # Select candidates

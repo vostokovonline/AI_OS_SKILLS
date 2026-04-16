@@ -35,7 +35,7 @@ interface AlertSummary {
   total_alerts: number;
   active_alerts: number;
   resolved_alerts: number;
-  active_by_type: Array<{
+  active_by_type?: Array<{
     alert_type: string;
     severity: string;
     count: number;
@@ -57,32 +57,40 @@ const Autonomy: React.FC = () => {
   const loadData = async () => {
     try {
       // Load alerts summary from backend
-      const alertsResponse = await apiClient.get('/alerts/summary');
-      setAlerts(alertsResponse.data.summary);
+      let alertsData: AlertSummary = { total_alerts: 0, active_alerts: 0, resolved_alerts: 0, active_by_type: [] };
+      try {
+        const alertsResponse = await apiClient.get('/alerts/summary');
+        if (alertsResponse.data?.summary) {
+          alertsData = alertsResponse.data.summary;
+        }
+      } catch (err) {
+        console.warn('Failed to load alerts summary, using defaults:', err);
+      }
+      setAlerts(alertsData);
 
-      // For now, use enhanced mock data for autonomy state
-      // TODO: Integrate with actual autonomy API when available
-      setState({
-        current_mode: 'autonomous',
-        active_policies: ['ethical_bounds', 'budget_limits', 'safety_first'],
-        safety_constraints: {
-          ethics: ['no_harm', 'privacy_first', 'transparency'],
-          budget: 10000,
-          time_horizon: '30d'
-        },
-        recent_decisions: [
-          {
-            id: '1',
-            node_id: 'goal-123',
-            action: 'decompose',
-            reasoning: 'Goal complexity requires decomposition',
-            confidence: 0.92,
-            timestamp: new Date().toISOString(),
-            status: 'executed'
-          }
-        ],
-        pending_overrides: 0
-      });
+      // Load autonomy state from real backend endpoint
+      try {
+        const stateResponse = await apiClient.get('/autonomy/state');
+        if (stateResponse.data && stateResponse.data.status === 'ok') {
+          setState({
+            current_mode: stateResponse.data.current_mode,
+            active_policies: stateResponse.data.active_policies || [],
+            safety_constraints: stateResponse.data.safety_constraints || { ethics: [], budget: 0, time_horizon: '0d' },
+            recent_decisions: stateResponse.data.recent_decisions || [],
+            pending_overrides: stateResponse.data.pending_overrides || 0
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to load autonomy state, using fallback:', err);
+        // Fallback to minimal state if endpoint fails
+        setState({
+          current_mode: 'idle',
+          active_policies: [],
+          safety_constraints: { ethics: [], budget: 0, time_horizon: '0d' },
+          recent_decisions: [],
+          pending_overrides: 0
+        });
+      }
 
       setLoading(false);
     } catch (err: any) {
@@ -239,8 +247,8 @@ const Autonomy: React.FC = () => {
             <h2 className="text-xl font-semibold text-gray-900">Recent Decisions</h2>
           </div>
           <div className="p-6">
-            {state?.recent_decisions.length === 0 ? (
-              <p className="text-gray-500 text-center py-4">No recent decisions</p>
+            {!state?.recent_decisions || state.recent_decisions.length === 0 ? (
+              <p className="text-gray-500 text-center py-4">No recent decisions - system is idle or no goals executed yet</p>
             ) : (
               <div className="space-y-4">
                 {state?.recent_decisions.map((decision) => (

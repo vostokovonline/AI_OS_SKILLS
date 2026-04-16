@@ -81,7 +81,7 @@ class GoalExecutor:
         title: str,
         description: str = "",
         goal_type: str = None,
-        auto_classify: bool = True,
+        auto_classify: bool = False,  # DEFAULT TO FALSE - avoid LLM blocking
         is_atomic: bool = False,
         depth_level: int = None,
         parent_id: str = None,
@@ -114,13 +114,13 @@ class GoalExecutor:
         
         # Классифицируем цель если нужно
         if auto_classify:
-            classification = await goal_decomposer.classify_goal(title, description)
+            classification = await goal_decomposer.safe_classify_goal(title, description, timeout=10.0)
             final_goal_type = goal_type or classification.get("goal_type", "achievable")
         else:
             final_goal_type = goal_type or "achievable"
 
-        # Анализируем домены
-        domains = await goal_decomposer.analyze_domains(title, description) if auto_classify else []
+        # Анализируем домены (SAFE - с таймаутом)
+        domains = await goal_decomposer.safe_analyze_domains(title, description, timeout=10.0) if auto_classify else []
 
         # AUTO-CALCULATE depth_level based on parent_id
         calculated_depth_level = depth_level
@@ -184,7 +184,7 @@ class GoalExecutor:
         # Сохраняем через UoW
         repo = GoalRepository()
         await repo.save(uow.session, goal)
-        
+
         # Log goal creation (no transition needed - already in pending)
         logger.info(
             "goal_created",
@@ -192,6 +192,31 @@ class GoalExecutor:
             goal_type=goal.goal_type,
             title=goal.title
         )
+
+        # EVENT-DRIVEN: Emit event for pipeline
+        try:
+            from application.events.pipeline import get_pipeline, PipelineEvent, PipelineEventType
+            pipeline = get_pipeline()
+            await pipeline.emit(PipelineEvent(
+                event_type=PipelineEventType.GOAL_CREATED,
+                goal_id=str(goal.id),
+                data={"goal_type": goal.goal_type, "is_atomic": is_atomic}
+            ))
+        except Exception:
+            pass  # Don't fail creation if event fails
+
+        # 🔧 FIX: Auto-decompose non-atomic goals (closed execution loop)
+        # Non-atomic goals MUST be decomposed or they'll stick in pending forever.
+        # We schedule decomposition as a background Celery task — doesn't block creation.
+        if not is_atomic:
+            from tasks import decompose_goal_task
+            decompose_goal_task.delay(str(goal.id))
+            logger.info(
+                "auto_decompose_scheduled",
+                goal_id=str(goal.id),
+                goal_title=title,
+                reason="non-atomic goals require decomposition"
+            )
 
         return goal
 

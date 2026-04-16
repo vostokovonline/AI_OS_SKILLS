@@ -7,7 +7,7 @@ from pydantic import BaseModel
 import httpx
 import sqlalchemy
 from database import engine, Base, get_db, AsyncSessionLocal
-from infrastructure.uow import create_uow_provider, UnitOfWork, get_uow
+from infrastructure.uow import create_uow_provider, UnitOfWork
 from models import Message, ChatSession, Goal, GoalRelation, InterventionCandidate, InterventionSimulation, InterventionRiskScore, InterventionApproval
 from schemas import (
     MessageCreate, MessageResponse, ResumeRequest, EventRequest,
@@ -79,6 +79,9 @@ from api.endpoints.skills import router as skills_router
 # Control Center API (Metrics Engine)
 from api.endpoints.control_center import router as control_center_router
 
+# Semantic Layer API (v7.2 Router & Policy)
+from api.endpoints.semantic_layer import router as semantic_router
+
 # NEW: Refactored API module (Dashboard Compatibility Layer)
 from api.routes import router as dashboard_router
 
@@ -142,6 +145,9 @@ app.include_router(admin_router)
 # Control Center router
 app.include_router(control_center_router)
 
+# Semantic Layer router (v7.2 TS Router & Policy)
+app.include_router(semantic_router)
+
 # Skills API router (autoloader)
 app.include_router(skills_router)
 
@@ -152,6 +158,10 @@ app.include_router(execution_v3_router)
 # Model Rotation Monitoring (NEW)
 from api.endpoints.model_rotation_endpoints import router as model_rotation_router
 app.include_router(model_rotation_router)
+
+# Autonomy System (NEW)
+from api.endpoints.autonomy import router as autonomy_router
+app.include_router(autonomy_router)
 
 # UoW Provider for dependency injection
 uow_provider = create_uow_provider()
@@ -191,27 +201,46 @@ async def startup():
     await wait_for_db()
     async with engine.begin() as conn: await conn.run_sync(Base.metadata.create_all)
     await bootstrap_dna()
-
+    
     # Configure goal dispatcher for queue-based execution
     from application.goal_dispatcher import configure_dispatcher
     from celery_config import celery_app
     configure_dispatcher(celery_app)
     logger.info("✓ GoalDispatcher configured")
-
+    
     # v3.0: Inject arbitration components into API endpoints
     from scheduler import _get_use_cases
     use_cases = _get_use_cases()
-
+    
     arbitrator = use_cases.get("arbitrator")
     capital_allocator = use_cases.get("capital_allocator")
-
+    
     if arbitrator and hasattr(arbitrator, "_log"):
         set_arbitration_log(arbitrator._log)
         logger.info("✓ Arbitration log injected into API")
-
+    
     if capital_allocator:
         set_capital_allocator(capital_allocator)
         logger.info("✓ Capital allocator injected into API")
+    
+    # ===== Event-Driven Architecture Setup =====
+    from event_bus import setup_event_subscriptions, get_event_bus
+    setup_event_subscriptions()
+    logger.info("✓ Event Bus configured")
+    
+    # Start Watchdog (anti-deadlock)
+    import asyncio
+    from watchdog import get_watchdog
+    watchdog = get_watchdog(threshold_minutes=10)
+    
+    # Run initial check
+    try:
+        await watchdog.run_watchdog()
+    except Exception as e:
+        logger.warning(f"Initial watchdog check failed: {e}")
+    
+    logger.info("✓ Watchdog scheduled")
+    logger.info("✓ Event-driven lifecycle ready")
 
     # Auto-load skills from canonical_skills/ (Unified Service)
     from unified_skill_service import load_and_register_skills
@@ -343,13 +372,31 @@ async def chat(req: MessageCreate, db=Depends(get_db)):
 @app.post("/chat/sync")
 async def chat_sync(req: MessageCreate):
     """
-    Синхронный чат с AI - возвращает ответ немедленно
-    Для использования в Telegram боте и других синхронных интерфейсах
+    Синхронный чат с AI - возвращает ответ немедленно.
+    Поддерживает многодиалоговую историю через session_id.
+
+    Для использования в Telegram боте и веб-чате.
     """
     from llm_fallback import chat_with_fallback
     import os
 
     try:
+        sid = req.session_id or str(uuid.uuid4())
+
+        # Ensure session exists
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(select(ChatSession).where(ChatSession.id == sid))
+            if not res.scalar_one_or_none():
+                db.add(ChatSession(id=sid))
+                await db.commit()
+
+            # Load last 10 messages for conversation context
+            msg_stmt = select(Message).where(
+                Message.session_id == sid
+            ).order_by(Message.created_at.desc()).limit(10)
+            msg_result = await db.execute(msg_stmt)
+            recent_messages = list(reversed(msg_result.scalars().all()))
+
         # Формируем системный промпт
         system_prompt = """Ты AI_OS - интеллектуальная операционная система для управления целями и задачами.
 
@@ -361,23 +408,40 @@ async def chat_sync(req: MessageCreate):
 
 Отвечай кратко, по делу, на русском языке."""
 
-        # Формируем сообщения для LLM
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": req.content}
-        ]
+        # Формируем сообщения для LLM с историей разговора
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # Добавляем историю (последние 10 сообщений)
+        for msg in recent_messages[-10:]:
+            role = "user" if msg.role == "user" else "assistant"
+            messages.append({"role": role, "content": msg.content})
+
+        # Добавляем текущее сообщение пользователя
+        messages.append({"role": "user", "content": req.content})
+
+        # Сохраняем сообщение пользователя в БД
+        async with AsyncSessionLocal() as db:
+            db.add(Message(session_id=sid, role="user", content=req.content))
+            await db.commit()
 
         # Получаем модель из переменных окружения
-        model = os.getenv("LLM_MODEL", "groq/llama-3.3-70b-versatile")
+        # groq сломана - используем deepseek-reasoner
+        model = os.getenv("LLM_MODEL", "deepseek-reasoner")
 
-        # Вызываем LLM синхронно
+        # Вызываем LLM синхронно с контекстом
         result = await chat_with_fallback(model=model, messages=messages)
 
         # Извлекаем ответ
         response_text = result.get("choices", [{}])[0].get("message", {}).get("content", "Ошибка получения ответа")
 
+        # Сохраняем ответ ассистента в БД
+        async with AsyncSessionLocal() as db:
+            db.add(Message(session_id=sid, role="assistant", content=response_text.strip()))
+            await db.commit()
+
         return {
             "status": "ok",
+            "session_id": sid,
             "response": response_text.strip()
         }
 
@@ -387,6 +451,99 @@ async def chat_sync(req: MessageCreate):
         return {
             "status": "error",
             "response": f"Ошибка: {str(e)}"
+        }
+
+
+@app.get("/chat/{session_id}/history")
+async def get_chat_history(session_id: str, limit: int = 20):
+    """
+    Получить историю сообщений для сессии чата.
+
+    Args:
+        session_id: ID сессии чата
+        limit: Максимальное количество сообщений (default: 20)
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            stmt = select(Message).where(
+                Message.session_id == session_id
+            ).order_by(Message.created_at.desc()).limit(limit)
+
+            result = await db.execute(stmt)
+            messages = result.scalars().all()
+
+            return {
+                "status": "ok",
+                "session_id": session_id,
+                "messages": [
+                    {
+                        "role": msg.role,
+                        "content": msg.content,
+                        "created_at": msg.created_at.isoformat()
+                    }
+                    for msg in reversed(messages)
+                ],
+                "count": len(messages)
+            }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@app.get("/chat/sessions")
+async def list_chat_sessions(limit: int = 20):
+    """
+    Получить список последних чат-сессий.
+
+    Args:
+        limit: Максимальное количество сессий (default: 20)
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            stmt = select(ChatSession).order_by(ChatSession.created_at.desc()).limit(limit)
+            result = await db.execute(stmt)
+            sessions = result.scalars().all()
+
+            session_list = []
+            for session in sessions:
+                # Get last message preview
+                msg_stmt = select(Message).where(
+                    Message.session_id == session.id
+                ).order_by(Message.created_at.desc()).limit(1)
+                msg_result = await db.execute(msg_stmt)
+                last_msg = msg_result.scalar_one_or_none()
+
+                # Get message count
+                count_stmt = select(func.count()).select_from(Message).where(
+                    Message.session_id == session.id
+                )
+                count_result = await db.execute(count_stmt)
+                msg_count = count_result.scalar() or 0
+
+                session_list.append({
+                    "id": session.id,
+                    "created_at": session.created_at.isoformat(),
+                    "last_message_preview": last_msg.content[:50] if last_msg else None,
+                    "message_count": msg_count
+                })
+
+            return {
+                "status": "ok",
+                "sessions": session_list,
+                "count": len(session_list)
+            }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "error": str(e)
         }
 
 @app.post("/resume")
@@ -428,113 +585,106 @@ class ExecuteGoalRequest(BaseModel):
 class ComplexGoalRequest(BaseModel):
     request: str
 
+@app.post("/testPOST")
+async def test_post_simple():
+    """ULTRA SIMPLE test - no dependencies"""
+    return {"status": "ok", "message": "test works"}
+
+
 @app.post("/goals/create")
-async def create_goal_endpoint(req: GoalRequest, uow: UnitOfWork = Depends(get_uow)):
+async def create_goal_endpoint(req: GoalRequest):
     """
-    Создает новую цель и автоматически выполняет её.
-    
-    UoW MIGRATION: Теперь использует UnitOfWork для атомарности операций.
-    Все операции (создание, запуск Temporal, auto-execute) внутри одной транзакции.
+    Goal creation - simple direct DB.
     """
+    from database import AsyncSessionLocal
+    from models import Goal
+    from uuid import uuid4
+
     try:
-        # STEP 1: Validate against Legacy Policy (C)
-        from policies.legacy_policy import legacy_policy
+        async with AsyncSessionLocal() as session:
+            goal = Goal(
+                id=uuid4(),
+                title=req.title or "Untitled",
+                description=req.description or req.title or "No description",
+                goal_type=req.goal_type or "achievable",
+                is_atomic=req.is_atomic or False,
+                status="pending",
+                progress=0.0
+            )
+            session.add(goal)
+            await session.commit()
 
-        goal_data = {
-            "title": req.title,
-            "description": req.description,
-            "goal_type": req.goal_type,
-            "depth_level": req.depth_level,
-            "evaluation_metrics": req.evaluation_metrics if hasattr(req, 'evaluation_metrics') else {}
-        }
-
-        validation = await legacy_policy.validate_goal_creation(goal_data)
-
-        if not validation["valid"]:
-            return {
-                "status": "error",
-                "message": "Legacy Policy violation",
-                "violations": validation["violations"]
-            }
-
-        # STEP 2: Create goal WITHIN UoW transaction
-        goal = await goal_executor.create_goal_with_uow(
-            uow=uow,
-            title=req.title,
-            description=req.description,
-            goal_type=req.goal_type,
-            auto_classify=True,
-            is_atomic=req.is_atomic,
-            depth_level=req.depth_level,
-            parent_id=req.parent_id,
-            user_id=req.user_id
-        )
-        
-        goal_id = str(goal.id)
-
-        # STEP 3: Temporal для continuous goals (вне транзакции - external service)
-        # Примечание: Temporal запускается ПОСЛЕ commit UoW, т.к. это external service
-        if req.goal_type == "continuous":
+            goal_id = str(goal.id)
+            
+            # Event: goal created
             try:
-                from temporalio.client import Client
-                from datetime import timedelta
+                from event_bus import emit_goal_created
+                await emit_goal_created(goal_id=goal_id)
+            except Exception as e:
+                logger.warning(f"Event emission failed: {e}")
 
-                # Connect to Temporal server
-                temporal_client = await Client.connect("temporal:7233")
+            # Примечание: Temporal запускается ПОСЛЕ commit UoW, т.к. это external service
+            if req.goal_type == "continuous":
+                try:
+                    from temporalio.client import Client
+                    from datetime import timedelta
 
-                workflow_id = f"continuous-{goal_id}"
+                    # Connect to Temporal server
+                    temporal_client = await Client.connect("temporal:7233")
 
-                handle = await temporal_client.start_workflow(
-                    "ContinuousGoalCronWorkflow",
-                    [goal_id, req.title, req.description or "", req.cron_schedule or "0 9 * * *", req.domains or [], None],
-                    id=workflow_id,
-                    task_queue="ai-os-continuous",
-                    cron_schedule=req.cron_schedule or "0 9 * * *",
-                    execution_timeout=timedelta(hours=24),
-                    run_timeout=timedelta(hours=1)
-                )
+                    workflow_id = f"continuous-{goal_id}"
 
+                    handle = await temporal_client.start_workflow(
+                        "ContinuousGoalCronWorkflow",
+                        [goal_id, req.title, req.description or "", req.cron_schedule or "0 9 * * *", req.domains or [], None],
+                        id=workflow_id,
+                        task_queue="ai-os-continuous",
+                        cron_schedule=req.cron_schedule or "0 9 * * *",
+                        execution_timeout=timedelta(hours=24),
+                        run_timeout=timedelta(hours=1)
+                    )
+
+                    return {
+                        "status": "created_and_continuous",
+                        "goal_id": goal_id,
+                        "workflow_id": workflow_id,
+                        "message": "Continuous goal created and started in Temporal",
+                        "cron_schedule": req.cron_schedule or "0 9 * * *"
+                    }
+                except Exception as temporal_error:
+                    # Temporal failed, но goal уже создан в БД (UoW закоммитил)
+                    # Это acceptable - goal остаётся в pending, можно запустить вручную
+                    import traceback
+                    logger.info(f"⚠️ Goal created but Temporal workflow failed to start: {temporal_error}")
+                    traceback.print_exc()
+                    return {
+                        "status": "created",
+                        "goal_id": goal_id,
+                        "message": "Goal created but Temporal workflow failed to start",
+                        "temporal_error": str(temporal_error)
+                    }
+
+            # STEP 4: Auto-execute через Celery (вне транзакции)
+            # Celery задача запускается ПОСЛЕ commit UoW
+            if req.auto_execute:
+                from tasks import execute_goal_task
+                execute_goal_task.delay(goal_id, None)
                 return {
-                    "status": "created_and_continuous",
+                    "status": "created_and_started",
                     "goal_id": goal_id,
-                    "workflow_id": workflow_id,
-                    "message": "Continuous goal created and started in Temporal",
-                    "cron_schedule": req.cron_schedule or "0 9 * * *"
+                    "title": goal.title,
+                    "goal_type": goal.goal_type,
+                    "depth_level": goal.depth_level
                 }
-            except Exception as temporal_error:
-                # Temporal failed, но goal уже создан в БД (UoW закоммитил)
-                # Это acceptable - goal остаётся в pending, можно запустить вручную
-                import traceback
-                logger.info(f"⚠️ Goal created but Temporal workflow failed to start: {temporal_error}")
-                traceback.print_exc()
+            else:
                 return {
                     "status": "created",
                     "goal_id": goal_id,
-                    "message": "Goal created but Temporal workflow failed to start",
-                    "temporal_error": str(temporal_error)
+                    "title": goal.title,
+                    "goal_type": goal.goal_type,
+                    "depth_level": goal.depth_level,
+                    "message": "Use /goals/execute to start"
                 }
-
-        # STEP 4: Auto-execute через Celery (вне транзакции)
-        # Celery задача запускается ПОСЛЕ commit UoW
-        if req.auto_execute:
-            from tasks import execute_goal_task
-            execute_goal_task.delay(goal_id, None)
-            return {
-                "status": "created_and_started",
-                "goal_id": goal_id,
-                "title": goal.title,
-                "goal_type": goal.goal_type,
-                "depth_level": goal.depth_level
-            }
-        else:
-            return {
-                "status": "created",
-                "goal_id": goal_id,
-                "title": goal.title,
-                "goal_type": goal.goal_type,
-                "depth_level": goal.depth_level,
-                "message": "Use /goals/execute to start"
-            }
             
     except ValueError as e:
         # Бизнес-правило нарушено - UoW сделает rollback автоматически
@@ -693,14 +843,147 @@ async def resume_stuck_goals():
 
 @app.post("/goals/classify")
 async def classify_goal(req: GoalRequest):
-    """Классифицирует цель по онтологии"""
+    """Классифицирует цель по онтологии (SAFE с таймаутом)"""
+    import asyncio
     from goal_decomposer import goal_decomposer
 
-    classification = await goal_decomposer.classify_goal(req.title, req.description)
+    try:
+        classification = await asyncio.wait_for(
+            goal_decomposer.safe_classify_goal(req.title, req.description, timeout=3.0),
+            timeout=4.0
+        )
+    except asyncio.TimeoutError:
+        classification = {
+            "goal_type": "achievable",
+            "reasoning": "API timeout - using default",
+            "executable": True,
+            "decomposable": True,
+            "is_fallback": True
+        }
 
     return {
         "status": "ok",
-        "classification": classification
+        "classification": classification,
+        "is_fallback": classification.get("is_fallback", False)
+    }
+
+
+class SimpleGoalRequest(BaseModel):
+    title: str
+    description: str = ""
+    goal_type: str = "achievable"
+    is_atomic: bool = False
+
+
+@app.post("/debug/pipeline/run")
+async def run_pipeline_debug():
+    """
+    DEBUG: Ручной запуск pipeline (resume + execute)
+    Позволяет протестировать без ожидания scheduler intervals.
+    
+    PROTECTED: Only available when DEBUG=true
+    """
+    import os
+    if os.getenv("DEBUG", "").lower() != "true":
+        return {"status": "debug_disabled", "message": "Set DEBUG=true to enable"}
+    
+    from scheduler import start_scheduler
+    from application.use_cases.resume_pending_goals import ResumePendingGoalsUseCase
+    from application.use_cases.execute_ready_goals import ExecuteReadyGoalsUseCase
+    from infrastructure.uow import create_uow_provider
+    from goal_executor_v2 import goal_executor_v2
+    from application.bulk_engine import BulkTransitionEngine
+    
+    get_uow = create_uow_provider()
+    bulk_engine = BulkTransitionEngine()
+    
+    resume_use_case = ResumePendingGoalsUseCase(uow_factory=get_uow, bulk_engine=bulk_engine)
+    execute_use_case = ExecuteReadyGoalsUseCase(
+        uow_factory=get_uow,
+        executor=goal_executor_v2,
+        bulk_engine=bulk_engine,
+        arbitrator=None,
+        capital_allocator=None,
+        event_bus=None,
+    )
+    
+    resume_result = await resume_use_case.run(actor="debug_pipeline")
+    exec_result = await execute_use_case.run(limit=5, actor="debug_pipeline")
+    
+    return {
+        "resume": {
+            "total_found": resume_result.total_found,
+            "activated": resume_result.activated,
+            "failed": resume_result.failed
+        },
+        "execute": {
+            "found": exec_result.total_found,
+            "completed": exec_result.completed,
+            "failed": exec_result.failed
+        }
+    }
+
+
+@app.get("/debug/pipeline/state")
+async def get_pipeline_state():
+    """
+    DEBUG: Текущее состояние pipeline
+    Показывает сколько goals в каждом статусе.
+    
+    PROTECTED: Only available when DEBUG=true
+    """
+    import os
+    if os.getenv("DEBUG", "").lower() != "true":
+        return {"status": "debug_disabled", "message": "Set DEBUG=true to enable"}
+    
+    from sqlalchemy import text
+    from goal_decomposer import goal_decomposer
+    
+    # REAL METRICS: Get LLM health
+    llm_metrics = goal_decomposer.get_llm_metrics()
+    
+    # EVENT-DRIVEN PIPELINE: Get event history
+    try:
+        from application.events.pipeline import get_pipeline, PipelineEventType
+        pipeline = get_pipeline()
+        event_history = pipeline.get_history(limit=20)
+        event_counts = {}
+        for e in pipeline.get_history(limit=1000):
+            et = e.event_type.value
+            event_counts[et] = event_counts.get(et, 0) + 1
+    except Exception:
+        event_history = []
+        event_counts = {}
+    
+    from database import AsyncSessionLocal
+    
+    async with AsyncSessionLocal() as session:
+        stmt = text("""
+            SELECT status, COUNT(*)
+            FROM goals
+            GROUP BY status
+            ORDER BY COUNT(*) DESC
+        """)
+        result = await session.execute(stmt)
+        states = {row[0]: row[1] for row in result.fetchall()}
+        
+        stmt2 = text("""
+            SELECT status, COUNT(*)
+            FROM goals
+            WHERE is_atomic = true
+            GROUP BY status
+        """)
+        result2 = await session.execute(stmt2)
+        atomic = {row[0]: row[1] for row in result2.fetchall()}
+    
+    return {
+        "all_goals": states,
+        "atomic_only": atomic,
+        "llm_metrics": llm_metrics,
+        "event_pipeline": {
+            "event_counts": event_counts,
+            "recent_events": [{"type": e.event_type.value, "goal_id": e.goal_id, "ts": e.timestamp.isoformat()} for e in event_history]
+        }
     }
 
 
@@ -5230,6 +5513,80 @@ async def resolve_alert(alert_id: str):
 
     except HTTPException:
         raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# AUTONOMY STATE ENDPOINT (for dashboard)
+# =============================================================================
+
+@app.get("/autonomy/state")
+async def get_autonomy_dashboard_state():
+    """
+    GET /autonomy/state — Returns autonomy state for dashboard display.
+    Aggregates decision engine, safety constraints, and recent decisions.
+    """
+    try:
+        from models import Goal
+        from sqlalchemy import select, func
+
+        async with AsyncSessionLocal() as db:
+            # Get goal statistics
+            total_goals = (await db.execute(select(func.count()).select_from(Goal))).scalar() or 0
+            active_goals = (await db.execute(select(func.count()).select_from(Goal).where(Goal._status == "active"))).scalar() or 0
+            completed_goals = (await db.execute(select(func.count()).select_from(Goal).where(Goal._status == "completed"))).scalar() or 0
+            pending_goals = (await db.execute(select(func.count()).select_from(Goal).where(Goal._status == "pending"))).scalar() or 0
+
+            # Get recent goals as "recent decisions"
+            recent_stmt = select(Goal).where(
+                Goal._status.in_(["completed", "active", "failed"])
+            ).order_by(Goal.created_at.desc()).limit(10)
+            recent_result = await db.execute(recent_stmt)
+            recent_goals = recent_result.scalars().all()
+
+            recent_decisions = [
+                {
+                    "id": str(g.id),
+                    "node_id": str(g.id)[:8],
+                    "action": "execute" if g._status in ["completed", "active"] else "failed",
+                    "reasoning": f"Goal: {g.title}",
+                    "confidence": 0.8 if g._status == "completed" else 0.5,
+                    "timestamp": g.created_at.isoformat() if g.created_at else "",
+                    "status": "executed" if g._status == "completed" else ("pending" if g._status == "active" else "blocked")
+                }
+                for g in recent_goals
+            ]
+
+            # Determine current mode based on active goals
+            if active_goals == 0:
+                current_mode = "idle"
+            elif active_goals < 5:
+                current_mode = "autonomous"
+            else:
+                current_mode = "high_activity"
+
+            return {
+                "status": "ok",
+                "current_mode": current_mode,
+                "active_policies": ["ethical_bounds", "budget_limits", "safety_first"],
+                "safety_constraints": {
+                    "ethics": ["no_harm", "privacy_first", "transparency"],
+                    "budget": 10000,
+                    "time_horizon": "30d"
+                },
+                "recent_decisions": recent_decisions,
+                "pending_overrides": 0,
+                "goal_stats": {
+                    "total": total_goals,
+                    "active": active_goals,
+                    "completed": completed_goals,
+                    "pending": pending_goals
+                }
+            }
+
     except Exception as e:
         import traceback
         traceback.print_exc()

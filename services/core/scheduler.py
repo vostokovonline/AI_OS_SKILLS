@@ -311,7 +311,7 @@ async def auto_resume_pending_goals():
 async def decompose_non_atomic_goals():
     """
     Декомпозирует активные не-атомарные цели.
-    
+
     Теперь это просто вызов use-case.
     """
     use_cases = _get_use_cases()
@@ -319,10 +319,33 @@ async def decompose_non_atomic_goals():
         actor="scheduler.decomposer",
         max_goals=5
     )
-    
+
     logger.info(
         f"decompose_summary: found={result.total_found}, decomposed={result.decomposed}, no_subgoals={result.no_subgoals}, failed={result.failed}"
     )
+
+
+async def decompose_pending_goals():
+    """
+    Декомпозирует застрявшие pending не-атомарные цели.
+
+    Это补齐ает пробел: новые цели создаются как 'pending',
+    но основной decompose job обрабатывает только 'active'.
+    Этот job находит pending цели старше 5 минут и декомпозирует их.
+
+    Runs every 5 minutes.
+    """
+    try:
+        from auto_decomposer import auto_decomposer
+        report = await auto_decomposer.scan_and_decompose_stuck_goals()
+
+        logger.info(
+            f"pending_decompose_summary: scanned={report['scanned']}, decomposed={report['decomposed']}, skipped={report['skipped']}, failed={report['failed']}"
+        )
+    except Exception as e:
+        logger.error(
+            f"pending_decompose_error: error={str(e)[:200]}"
+        )
 
 
 async def run_nightly_invariants_check():
@@ -447,12 +470,21 @@ def start_scheduler():
         **JOB_CONFIG
     )
 
-    # Decomposition Scheduler every 10 mins
+    # Decomposition Scheduler every 10 mins (active goals)
     scheduler.add_job(
         decompose_non_atomic_goals,
         'interval',
         minutes=10,
         id='decompose_executor',
+        **JOB_CONFIG
+    )
+
+    # Pending Goals Decomposition every 5 mins (catches newly created pending goals)
+    scheduler.add_job(
+        decompose_pending_goals,
+        'interval',
+        minutes=5,
+        id='decompose_pending',
         **JOB_CONFIG
     )
 
@@ -536,6 +568,66 @@ def start_scheduler():
         'interval',
         minutes=10,
         id='pipeline_evolution',
+        **JOB_CONFIG
+    )
+
+    # 🔧 FIX: Self-healing watchdog — finds stuck non-atomic goals and triggers decomposition
+    async def stuck_goals_watchdog():
+        """
+        Finds goals stuck in pending/active with 0 progress and auto-decomposes them.
+        This is the safety net for goals that somehow avoided auto-decomposition at creation.
+        """
+        from sqlalchemy import select, and_
+        from models import Goal as GoalModel
+        from database import AsyncSessionLocal
+        from datetime import datetime, timedelta, timezone
+        from tasks import decompose_goal_task
+
+        logger.info("watchdog_starting", reason="checking for stuck goals")
+
+        async with AsyncSessionLocal() as db:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            stmt = select(GoalModel).where(
+                and_(
+                    GoalModel._status.in_(["pending", "active"]),
+                    GoalModel.progress == 0,
+                    GoalModel.is_atomic == False,
+                    GoalModel.created_at < cutoff,
+                )
+            ).limit(20)
+            result = await db.execute(stmt)
+            stuck = result.scalars().all()
+
+            decomposed = 0
+            for goal in stuck:
+                # Check if already has children — skip those
+                children_stmt = select(GoalModel).where(GoalModel.parent_id == goal.id).limit(1)
+                children_result = await db.execute(children_stmt)
+                has_children = children_result.scalar_one_or_none() is not None
+
+                if has_children:
+                    continue  # Already decomposed, just stuck for other reasons
+
+                # Trigger decomposition
+                decompose_goal_task.delay(str(goal.id))
+                decomposed += 1
+                age_hours = (datetime.now(timezone.utc) - goal.created_at).total_seconds() / 3600
+                logger.info(
+                    "watchdog_decomposed",
+                    goal_id=str(goal.id),
+                    goal_title=goal.title,
+                    status=goal._status,
+                    age_hours=round(age_hours, 1)
+                )
+
+            if decomposed > 0:
+                logger.info("watchdog_complete", decomposed=decomposed, total_stuck=len(stuck))
+
+    scheduler.add_job(
+        stuck_goals_watchdog,
+        'interval',
+        minutes=5,
+        id='stuck_goals_watchdog',
         **JOB_CONFIG
     )
 

@@ -169,6 +169,20 @@ class GoalTransitionService:
                         logger.info(f"  🔓 Unblocked {len(unblocked)} dependent goals")
                 except Exception as dep_err:
                     logger.warning(f"  ⚠️ Dependency resolution failed: {dep_err}")
+
+                # Event-driven parent progress propagation (единственный источник)
+                try:
+                    from progress_propagation import on_goal_completed
+                    await on_goal_completed(uow.session, goal)
+                    
+                    # Emit event for other handlers
+                    from event_bus import emit_goal_completed
+                    await emit_goal_completed(
+                        goal_id=str(goal.id),
+                        parent_id=str(goal.parent_id) if goal.parent_id else None
+                    )
+                except Exception as agg_err:
+                    logger.warning(f"  ⚠️ Progress propagation failed: {agg_err}")
             
             return {
                 "result": TransitionResult.SUCCESS.value,
@@ -217,42 +231,129 @@ class GoalTransitionService:
     ) -> tuple[bool, str]:
         """
         Validate terminal state transitions through CompletionEngine.
-        
+
         Args:
             session: Database session
             goal_id: Goal to validate
             target_state: Target terminal state
-            
+
         Returns:
             (allowed, reason) tuple
         """
         from autonomy.completion_engine import get_completion_engine, CompletionStatus
-        
+
         engine = get_completion_engine()
-        
+
         try:
             result = await engine.evaluate(session, goal_id)
-            
+
             if target_state == "done":
                 if result.computed_status == CompletionStatus.DONE:
                     return True, f"Completion verified: {result.reason}"
                 else:
                     return False, f"Completion not verified: {result.reason}"
-            
+
             if target_state == "failed":
                 if result.computed_status == CompletionStatus.FAILED:
                     return True, f"Failure verified: {result.reason}"
                 else:
                     return True, f"Manual failure override (current: {result.computed_status.value})"
-            
+
             if target_state in ("frozen", "permanent"):
                 return True, "Administrative state - completion check skipped"
-            
+
             return True, "Unknown terminal state - allowing transition"
-            
+
         except Exception as e:
             logger.error("completion_validation_error", error=str(e), goal_id=str(goal_id))
             return False, f"Completion evaluation failed: {str(e)}"
+
+    async def _update_parent_progress(self, session, goal) -> None:
+        """
+        ЕДИНСТВЕННЫЙ источник правды для обновления прогресса родителя.
+        
+        Вызывается строго при completion дочерней цели.
+        
+        Formula: parent.progress = done_children / total_children
+        If all children done → parent status = "done"
+        
+        Рекурсивно обновляет всех предков.
+        """
+        if not goal.parent_id:
+            return  # Root goal, no parent to update
+        
+        from sqlalchemy import select, func
+        from models import Goal as GoalModel
+        
+        # Обновляем цепочку предков (рекурсия)
+        current_parent_id = goal.parent_id
+        
+        while current_parent_id:
+            parent = await session.get(GoalModel, current_parent_id)
+            if not parent:
+                break
+            
+            if parent.is_atomic:
+                # Atomic родитель - просто помечаем как done
+                parent._internal_set_status("done")
+                parent.progress = 1.0
+                await session.commit()
+                
+                # Если есть предок - продолжаем цепочку
+                if parent.parent_id:
+                    current_parent_id = parent.parent_id
+                else:
+                    break
+                continue
+            
+            # Non-atomic родитель - считаем прогресс по детям
+            total_stmt = select(func.count(GoalModel.id)).where(GoalModel.parent_id == parent.id)
+            total_result = await session.execute(total_stmt)
+            total_children = total_result.scalar() or 0
+            
+            if total_children == 0:
+                break
+            
+            done_stmt = select(func.count(GoalModel.id)).where(
+                GoalModel.parent_id == parent.id,
+                GoalModel._status == "done"
+            )
+            done_result = await session.execute(done_stmt)
+            done_children = done_result.scalar() or 0
+            
+            new_progress = done_children / total_children
+            old_progress = parent.progress
+            parent.progress = new_progress
+            
+            logger.info(
+                "parent_progress_updated",
+                parent_id=str(parent.id),
+                parent_title=parent.title[:30],
+                done_children=done_children,
+                total_children=total_children,
+                old_progress=f"{old_progress:.0%}",
+                new_progress=f"{new_progress:.0%}"
+            )
+            
+            # Если все дети выполнены → родитель done
+            if done_children == total_children and new_progress >= 1.0:
+                parent._internal_set_status("done")
+                parent.completed_at = datetime.now()
+                
+                logger.info(
+                    "parent_auto_completed",
+                    parent_id=str(parent.id),
+                    parent_title=parent.title[:30],
+                    reason="all children done"
+                )
+            
+            await session.commit()
+            
+            # Переходим к следующему предку
+            if parent.parent_id:
+                current_parent_id = parent.parent_id
+            else:
+                break
     
     async def sync_computed_status(
         self,

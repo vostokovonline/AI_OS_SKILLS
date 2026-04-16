@@ -397,3 +397,24 @@ class BulkTransitionService:
 
 # Singleton instance
 bulk_transition_service = BulkTransitionService()
+
+
+# Default UoW provider for dependency injection
+# Usage: from infrastructure.uow import get_uow
+_uow_provider = create_uow_provider()
+
+
+async def get_uow():
+    """
+    FastAPI Depends для UnitOfWork.
+    
+    Usage:
+        @app.post("/endpoint")
+        async def endpoint(uow: UnitOfWork = Depends(get_uow)):
+            async with uow:
+                # your code here
+                pass
+    """
+    uow = _uow_provider()
+    async with uow:
+        yield uow

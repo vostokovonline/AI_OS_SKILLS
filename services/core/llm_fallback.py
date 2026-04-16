@@ -118,12 +118,12 @@ class LLMFallbackManager:
         """
         # Проверяем если это Groq модель и она в cooldown
         is_groq_model = "groq" in model.lower()
-
-        if is_groq_model and not await self.is_groq_available():
-            logger.info(f"⏳ Groq is in cooldown, using fallback: {FALLBACK_MODEL}")
-            model = FALLBACK_MODEL
-            if "ollama" in FALLBACK_MODEL:
-                kwargs["api_base"] = FALLBACK_API_BASE
+        
+        # groq сломана - всегда используем deepseek-reasoner
+        if is_groq_model or "qwen3" in model:
+            logger.info(f"⚠️ Using deepseek-reasoner (groq broken)")
+            model = "deepseek-reasoner"
+            kwargs.pop("api_base", None)  # Remove custom api_base
 
         # Выполняем запрос через litellm
         url = f"{self.litellm_base_url}/chat/completions"
@@ -203,6 +203,35 @@ class LLMFallbackManager:
 
 # Глобальный инстанс
 llm_fallback = LLMFallbackManager()
+
+
+def chat_with_fallback_sync(model: str, messages: list, **kwargs) -> Dict[str, Any]:
+    """
+    Синхронная обертка для LLM вызовов с fallback.
+    """
+    import httpx
+    import os
+    
+    litellm_base_url = os.getenv("OPENAI_API_BASE", "http://ns_litellm:4000/v1")
+    api_key = os.getenv("OPENAI_API_KEY", "sk-1234")
+    
+    url = f"{litellm_base_url}/chat/completions"
+    
+    payload = {
+        "model": model,
+        "messages": messages,
+        **kwargs
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    with httpx.Client(timeout=120.0) as client:
+        response = client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.json()
 
 
 async def chat_with_fallback(model: str, messages: list, **kwargs) -> Dict[str, Any]:

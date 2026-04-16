@@ -35,6 +35,10 @@ import UnifiedChat from "./pages/UnifiedChat";
 import { LLMControlCenter } from "./pages/LLMControlCenter";
 import ControlCenter from "./pages/ControlCenter";
 import Evolution from "./pages/Evolution";
+import Goals from "./pages/Goals";
+import PlanMemory from "./pages/PlanMemory";
+import TraceTimeline from "./pages/TraceTimeline";
+import Capabilities from "./pages/Capabilities";
 // import QuestionsViewTest from './components/questions/QuestionsViewTest';
 import { useExecutionLogStore } from './store/executionLogStore';
 import { X } from 'lucide-react';
@@ -122,6 +126,26 @@ const App: React.FC = () => {
             <Evolution />
           </div>
 
+          {/* Goals Page - Goal Hierarchy & Execution Tracking */}
+          <div className={view === 'goals' ? 'absolute inset-0 bg-gray-900 overflow-hidden' : 'hidden'}>
+            <Goals />
+          </div>
+
+          {/* Plan Memory - Hierarchical MAB */}
+          <div className={view === 'plan-memory' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <PlanMemory />
+          </div>
+
+          {/* Trace Timeline - Execution Traces */}
+          <div className={view === 'trace-timeline' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <TraceTimeline />
+          </div>
+
+          {/* Capabilities - UCB1 Selector */}
+          <div className={view === 'capabilities' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
+            <Capabilities />
+          </div>
+
           {/* Observability Console */}
           <div className={view === 'observability' ? 'absolute inset-0 bg-gray-900 overflow-auto' : 'hidden'}>
             <ObservabilityConsole />
@@ -138,7 +162,7 @@ const App: React.FC = () => {
           </div>
 
           {/* Graph/Gantt/Tree Views */}
-          <div className={view !== 'observability' && view !== 'questions' && view !== 'decomposition' && view !== 'skills' && view !== 'deployments' && view !== 'occp-observability' && view !== 'federation' && view !== 'artifacts' && view !== 'autonomy' && view !== 'admin' && view !== 'decision' && view !== 'llm-analytics' && view !== 'system-health' && view !== 'performance' && view !== 'unified-chat' && view !== 'llm-control' ? 'absolute inset-0 flex' : 'hidden'}>
+          <div className={view !== 'observability' && view !== 'questions' && view !== 'decomposition' && view !== 'skills' && view !== 'deployments' && view !== 'occp-observability' && view !== 'artifacts' && view !== 'autonomy' && view !== 'admin' && view !== 'decision' && view !== 'llm-analytics' && view !== 'system-health' && view !== 'performance' && view !== 'unified-chat' && view !== 'llm-control' && view !== 'evolution' && view !== 'goals' && view !== 'control-center' && view !== 'plan-memory' && view !== 'trace-timeline' && view !== 'capabilities' ? 'absolute inset-0 flex' : 'hidden'}>
             {/* Center Canvas */}
             <div className="flex-1 flex flex-col">
               {view === 'graph' && <GraphCanvas />}

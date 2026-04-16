@@ -1,11 +1,12 @@
 """
 GOAL DECOMPOSER - Система декомпозиции целей
-Разбивает цели на подцели согласно онтологии и критериям атомарности
+Разбивает цели на подцели согласно онтологии и критериям атомарности 
 
 UoW MIGRATION: Декомпозиция теперь атомарна - все операции в одной транзакции.
 """
 import os
 import uuid
+import asyncio
 from typing import List, Dict, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
 from sqlalchemy import select, func
@@ -48,11 +49,26 @@ class GoalDecomposer:
 
     def __init__(self):
         self.decomposition_history = {}
+        # REAL METRICS: Track LLM fallbacks
+        self._llm_fallback_count = 0
+        self._llm_success_count = 0
 
-    async def classify_goal(self, title: str, description: str = "") -> Dict:
+    def get_llm_metrics(self) -> Dict:
+        """REAL METRICS: Get LLM health metrics"""
+        total = self._llm_fallback_count + self._llm_success_count
+        fallback_rate = self._llm_fallback_count / total if total > 0 else 0.0
+        return {
+            "llm_fallback_count": self._llm_fallback_count,
+            "llm_success_count": self._llm_success_count,
+            "llm_total_calls": total,
+            "llm_fallback_rate": fallback_rate,
+            "llm_health_status": "CRITICAL" if fallback_rate > 0.5 else "DEGRADED" if fallback_rate > 0.2 else "OK"
+        }
+
+    async def safe_classify_goal(self, title: str, description: str = "", timeout: float = 10.0) -> Dict:
         """
-        Классифицирует цель по типологии
-
+        SAFE классификация с таймаутом - НИКОГДА не блокирует систему
+        
         Returns:
             {
                 "goal_type": "achievable|continuous|directional|exploratory|meta",
@@ -60,6 +76,32 @@ class GoalDecomposer:
                 "executable": True/False,
                 "decomposable": True/False
             }
+        """
+        default_result = {
+            "goal_type": "achievable",
+            "reasoning": "Таймаут классификации, по умолчанию achievable",
+            "executable": True,
+            "decomposable": True,
+            "is_fallback": True
+        }
+        
+        try:
+            return await asyncio.wait_for(
+                self._classify_goal_impl(title, description),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("LLM FALLBACK: classify_goal_timeout", title=title[:50])
+            self._llm_fallback_count += 1  # REAL METRIC
+            return default_result
+        except Exception as e:
+            logger.warning("LLM FALLBACK: classify_goal_error", error=str(e)[:100])
+            self._llm_fallback_count += 1  # REAL METRIC
+            return default_result
+
+    async def _classify_goal_impl(self, title: str, description: str = "") -> Dict:
+        """
+        Внутренняя реализация классификации
         """
         classification_prompt = f"""Классифицируй цель по онтологии:
 
@@ -112,6 +154,7 @@ class GoalDecomposer:
             if classification["goal_type"] not in self.GOAL_TYPES:
                 classification["goal_type"] = "achievable"  # default
 
+            self._llm_success_count += 1  # REAL METRIC
             return classification
 
         except Exception as e:
@@ -123,12 +166,27 @@ class GoalDecomposer:
                 "decomposable": True
             }
 
-    async def analyze_domains(self, title: str, description: str = "") -> List[str]:
+    async def safe_analyze_domains(self, title: str, description: str = "", timeout: float = 10.0) -> List[str]:
         """
-        Определяет домены цели
+        SAFE анализ доменов с таймаутом - НИКОГДА не блокирует систему
+        """
+        default_domains = ["general"]
+        
+        try:
+            return await asyncio.wait_for(
+                self._analyze_domains_impl(title, description),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.warning("LLM FALLBACK: analyze_domains_timeout", title=title[:50])
+            return default_domains
+        except Exception as e:
+            logger.warning("LLM FALLBACK: analyze_domains_error", error=str(e)[:100])
+            return default_domains
 
-        Returns:
-            ["nutrition", "light", "temperature", ...]
+    async def _analyze_domains_impl(self, title: str, description: str = "") -> List[str]:
+        """
+        Внутренняя реализация анализа доменов
         """
         domain_prompt = f"""Определи домены для этой цели:
 
@@ -158,6 +216,7 @@ class GoalDecomposer:
                 result = result.split("```")[1].split("```")[0].strip()
 
             data = json.loads(result)
+            self._llm_success_count += 1  # REAL METRIC
             return data.get("domains", [])
 
         except Exception as e:

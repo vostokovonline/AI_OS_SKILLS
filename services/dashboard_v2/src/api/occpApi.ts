@@ -3,7 +3,7 @@
  * Integration with OCCP v1.0 backend services
  */
 
-interface Skill {
+export interface Skill {
   skill_id: string;
   version: string;
   author: string;
@@ -12,7 +12,7 @@ interface Skill {
   contracts: any;
 }
 
-interface Deployment {
+export interface Deployment {
   deployment_id: string;
   skill_id: string;
   version: string;
@@ -22,7 +22,7 @@ interface Deployment {
   updated_at: string;
 }
 
-interface Metric {
+export interface Metric {
   timestamp: string;
   skill_id: string;
   version: string;
@@ -31,7 +31,7 @@ interface Metric {
   duration_ms: number;
 }
 
-interface Node {
+export interface Node {
   node_id: string;
   role: 'primary' | 'edge';
   status: 'active' | 'inactive' | 'degraded';
@@ -57,108 +57,108 @@ interface Proposal {
   created_at: string;
 }
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = '';
 
 /**
- * OCCP API Client
+ * OCCP API Client - Real backend integration
  */
 export const occpApi = {
   /**
    * Get all deployed skills
+   * Backend returns: { skills: [{name, version, description, category, ...}] }
    */
   async getSkills(): Promise<Skill[]> {
-    // In real implementation, this would call the OCCP backend
-    // For now, return mock data based on our deployed skills
-    return [
-      {
-        skill_id: 'hello_world',
-        version: '1.0.0',
-        author: 'authority',
-        description: 'Simple hello world skill for testing OCCP v1.0',
-        capabilities: ['greet', 'echo', 'get_timestamp'],
-        contracts: {
-          max_execution_time_seconds: 10,
-          max_memory_mb: 64,
-          max_tokens: 1000
-        }
-      },
-      {
-        skill_id: 'calculator',
-        version: '1.0.0',
-        author: 'authority',
-        description: 'Advanced calculator with multiple operations',
-        capabilities: ['add', 'subtract', 'multiply', 'divide', 'power'],
-        contracts: {
-          max_execution_time_seconds: 5,
-          max_memory_mb: 32,
-          max_tokens: 500
-        }
+    try {
+      const response = await fetch(`${API_BASE}/skills/`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+
+      // Transform backend format to UI format
+      if (data.status === 'ok' && Array.isArray(data.skills)) {
+        return data.skills.map((s: any) => ({
+          skill_id: s.name || s.id,
+          version: s.version || '1.0',
+          author: 'system',
+          description: s.description || '',
+          capabilities: Array.isArray(s.agent_roles) ? s.agent_roles : (s.category ? [s.category] : []),
+          contracts: s.constraints || {}
+        }));
       }
-    ];
+      return [];
+    } catch (err) {
+      console.error('[OCCP] Failed to load skills:', err);
+      return [];
+    }
   },
 
   /**
    * Get all deployments
+   * Backend returns: { events: [{event_type, skill_id, version, timestamp, ...}], total: N }
    */
   async getDeployments(): Promise<Deployment[]> {
-    // Mock data - directly return since backend doesn't have this endpoint yet
-    console.log('[OCCP] Loading deployments (using mock data)');
+    try {
+      const response = await fetch(`${API_BASE}/skills/lifecycle/history`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
 
-    // Simulate async delay for realism
-    await new Promise(resolve => setTimeout(resolve, 300));
+      // Transform lifecycle events to deployment format
+      if (data && Array.isArray(data.events)) {
+        return data.events.map((event: any, idx: number) => {
+          // Map event types to deployment statuses
+          let status: Deployment['status'] = 'stable';
+          if (event.event_type?.includes('rollback')) status = 'rolled_back';
+          else if (event.event_type?.includes('canary')) status = 'canary';
+          else if (event.event_type?.includes('activate')) status = 'stable';
 
-    return [
-      {
-        deployment_id: 'dep-001',
-        skill_id: 'hello_world',
-        version: '1.0.0',
-        status: 'stable',
-        traffic_percentage: 100,
-        created_at: new Date(Date.now() - 86400000).toISOString(),
-        updated_at: new Date().toISOString()
-      },
-      {
-        deployment_id: 'dep-002',
-        skill_id: 'calculator',
-        version: '1.0.0',
-        status: 'canary',
-        traffic_percentage: 10,
-        created_at: new Date(Date.now() - 3600000).toISOString(),
-        updated_at: new Date().toISOString()
+          return {
+            deployment_id: event.id || `deploy-${idx}`,
+            skill_id: event.skill_id || 'unknown',
+            version: event.version || '1.0',
+            status,
+            traffic_percentage: event.traffic_percentage || (status === 'stable' ? 100 : status === 'canary' ? 10 : 0),
+            created_at: event.created_at || event.timestamp || new Date().toISOString(),
+            updated_at: event.updated_at || event.timestamp || new Date().toISOString()
+          };
+        });
       }
-    ];
+      return [];
+    } catch (err) {
+      console.error('[OCCP] Failed to load deployments:', err);
+      return [];
+    }
   },
 
   /**
-   * Get metrics for a skill
+   * Get metrics for all skills or a specific skill
+   * Backend returns: { events: [{event_type, skill_id, duration_ms, status, timestamp, ...}] }
    */
-  async getMetrics(skillId?: string): Promise<Metric[]> {
-    // Mock data - generate sample metrics since backend doesn't have this endpoint yet
-    console.log('[OCCP] Loading metrics', skillId ? `for ${skillId}` : '(all skills)', '(using mock data)');
+  async getMetrics(_skillId?: string): Promise<Metric[]> {
+    try {
+      // For now, fetch all metrics from the history endpoint
+      const url = `${API_BASE}/skills/lifecycle/history?limit=100`;
 
-    // Simulate async delay for realism
-    await new Promise(resolve => setTimeout(resolve, 200));
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
 
-    const now = Date.now();
-    const skills = skillId ? [skillId] : ['hello_world', 'calculator'];
-    const metrics: Metric[] = [];
+      // Transform lifecycle events to metric format
+      if (data && Array.isArray(data.events)) {
+        return data.events.map((event: any) => ({
+          timestamp: event.timestamp || event.created_at || new Date().toISOString(),
+          skill_id: event.skill_id || 'unknown',
+          version: event.version || '1.0',
+          action: event.event_type || event.action || 'unknown',
+          status: event.status || event.result || 'passed',
+          duration_ms: event.duration_ms || event.execution_time || 0
+        }));
+      }
 
-    for (let i = 0; i < 50; i++) {
-      const skill = skills[i % skills.length];
-      const timestamp = new Date(now - i * 60000).toISOString();
-      const passed = Math.random() > 0.1; // 90% success rate
-
-      metrics.push({
-        timestamp,
-        skill_id: skill,
-        version: '1.0.0',
-        action: ['greet', 'calculate', 'add', 'echo'][i % 4],
-        status: passed ? 'passed' : 'failed',
-        duration_ms: Math.floor(Math.random() * 200) + 50
-      });
+      // If no events, return empty
+      return [];
+    } catch (err) {
+      console.error('[OCCP] Failed to load metrics:', err);
+      return [];
     }
-
-    return metrics;
   },
 
   /**
@@ -222,7 +222,7 @@ export const occpApi = {
     const response = await fetch(`${API_BASE}/deploy`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skill_id, version })
+      body: JSON.stringify({ skill_id: skillId, version })
     });
     if (!response.ok) {
       throw new Error('Failed to deploy skill');

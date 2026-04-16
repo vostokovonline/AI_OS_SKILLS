@@ -17,7 +17,6 @@ import {
   Shield,
   DollarSign,
   Clock,
-  Ban,
   Flame,
   AlertTriangle,
   Microscope,
@@ -30,12 +29,19 @@ import {
   GitBranch,
   Heart,
   MessageCircle,
+  MessageSquare,
   Package,
   Rocket,
   Activity,
-  Globe,
   FileText,
+  Target,
+  BarChart3,
+  Plus,
+  Layers,
+  Clock as ClockIcon,
 } from 'lucide-react';
+
+import GoalCreationModal from '../goals/GoalCreationModal';
 
 interface ControlPanelProps {
   onToggleEmotionalLayer?: () => void;
@@ -59,6 +65,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
   const addToast = useToastStore((state) => state.add);
   const addLog = useExecutionLogStore((state) => state.add);
   const [searchQuery, setSearchQueryLocal] = useState(filters.searchQuery);
+  const [showGoalModal, setShowGoalModal] = useState(false);
 
   const filteredCount = getFilteredNodes().length;
   const totalCount = nodes.size;
@@ -73,26 +80,26 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
   };
 
   const quickFilters = [
-    { key: 'showActive' as const, label: 'Active', icon: Zap, color: 'text-blue-400' },
-    { key: 'showPending' as const, label: 'Pending', icon: Clock, color: 'text-gray-400' },
-    { key: 'showDone' as const, label: 'Done', icon: CheckCircle, color: 'text-green-400' },
-    { key: 'showBlocked' as const, label: 'Blocked', icon: XCircle, color: 'text-red-400' },
+    { key: 'showActive' as const, label: 'Активные', icon: Zap, color: 'text-blue-400' },
+    { key: 'showPending' as const, label: 'Ожидающие', icon: Clock, color: 'text-gray-400' },
+    { key: 'showDone' as const, label: 'Завершённые', icon: CheckCircle, color: 'text-green-400' },
+    { key: 'showBlocked' as const, label: 'Заблокированные', icon: XCircle, color: 'text-red-400' },
   ];
 
   const modes = [
-    { id: 'explore' as const, icon: Brain, label: 'Explore', color: 'text-blue-400' },
-    { id: 'exploit' as const, icon: Zap, label: 'Exploit', color: 'text-yellow-400' },
-    { id: 'reflect' as const, icon: Eye, label: 'Reflect', color: 'text-purple-400' },
+    { id: 'explore' as const, icon: Brain, label: 'Исследование', color: 'text-blue-400' },
+    { id: 'exploit' as const, icon: Zap, label: 'Использование', color: 'text-yellow-400' },
+    { id: 'reflect' as const, icon: Eye, label: 'Рефлексия', color: 'text-purple-400' },
   ];
 
   const overlays = [
-    { id: 'none' as const, icon: null, label: 'None' },
-    { id: 'heatmap' as const, icon: Flame, label: 'Heatmap', color: 'text-orange-400' },
-    { id: 'conflicts' as const, icon: AlertTriangle, label: 'Conflicts', color: 'text-red-400' },
+    { id: 'none' as const, icon: null, label: 'Нет' },
+    { id: 'heatmap' as const, icon: Flame, label: 'Тепловая карта', color: 'text-orange-400' },
+    { id: 'conflicts' as const, icon: AlertTriangle, label: 'Конфликты', color: 'text-red-400' },
     {
       id: 'memory_traces' as const,
       icon: Microscope,
-      label: 'Memory Traces',
+      label: 'Следы памяти',
       color: 'text-purple-400',
     },
   ];
@@ -101,8 +108,23 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
     <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
       {/* View Selector */}
       <div className="p-4 border-b border-gray-700">
-        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">View</h3>
-        <div className="space-y-2">
+        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Представление</h3>
+        <div className="space-y-2 max-h-[45vh] overflow-y-auto">
+          {/* Chat - Primary feature, always visible at top */}
+          <button
+            onClick={() => setView('unified-chat')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'unified-chat'
+                  ? 'bg-cyan-900/50 border border-cyan-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <MessageSquare size={18} className={view === 'unified-chat' ? 'text-cyan-400' : ''} />
+            <span className="text-sm font-medium">💬 Чат с системой</span>
+          </button>
           <button
             onClick={() => setView('graph')}
             className={`
@@ -115,7 +137,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Network size={18} className={view === 'graph' ? 'text-purple-400' : ''} />
-            <span className="text-sm font-medium">Graph</span>
+            <span className="text-sm font-medium">Граф целей</span>
           </button>
           <button
             onClick={() => setView('gantt')}
@@ -129,7 +151,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Calendar size={18} className={view === 'gantt' ? 'text-purple-400' : ''} />
-            <span className="text-sm font-medium">Timeline (Gantt)</span>
+            <span className="text-sm font-medium">Временная шкала</span>
           </button>
           <button
             onClick={() => setView('tree')}
@@ -143,7 +165,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <GitBranch size={18} className={view === 'tree' ? 'text-purple-400' : ''} />
-            <span className="text-sm font-medium">Dependency Tree</span>
+            <span className="text-sm font-medium">Дерево зависимостей</span>
           </button>
           <button
             onClick={() => setView('observability')}
@@ -206,7 +228,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Package size={18} className={view === 'skills' ? 'text-green-400' : ''} />
-            <span className="text-sm font-medium">Skills</span>
+            <span className="text-sm font-medium">Навыки</span>
           </button>
           <button
             onClick={() => setView('deployments')}
@@ -220,7 +242,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Rocket size={18} className={view === 'deployments' ? 'text-yellow-400' : ''} />
-            <span className="text-sm font-medium">Deployments</span>
+            <span className="text-sm font-medium">Развёртывания</span>
           </button>
           <button
             onClick={() => setView('occp-observability')}
@@ -234,21 +256,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Activity size={18} className={view === 'occp-observability' ? 'text-blue-400' : ''} />
-            <span className="text-sm font-medium">Metrics</span>
-          </button>
-          <button
-            onClick={() => setView('federation')}
-            className={`
-              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
-              ${
-                view === 'federation'
-                  ? 'bg-purple-900/50 border border-purple-500 text-white'
-                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
-              }
-            `}
-          >
-            <Globe size={18} className={view === 'federation' ? 'text-purple-400' : ''} />
-            <span className="text-sm font-medium">Federation</span>
+            <span className="text-sm font-medium">Метрики</span>
           </button>
           <button
             onClick={() => setView('artifacts')}
@@ -262,7 +270,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <FileText size={18} className={view === 'artifacts' ? 'text-orange-400' : ''} />
-            <span className="text-sm font-medium">Artifacts</span>
+            <span className="text-sm font-medium">Артефакты</span>
           </button>
           <button
             onClick={() => setView('autonomy')}
@@ -276,7 +284,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Brain size={18} className={view === 'autonomy' ? 'text-indigo-400' : ''} />
-            <span className="text-sm font-medium">Autonomy</span>
+            <span className="text-sm font-medium">Автономия</span>
           </button>
           <button
             onClick={() => setView('admin')}
@@ -290,14 +298,105 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             `}
           >
             <Shield size={18} className={view === 'admin' ? 'text-cyan-400' : ''} />
-            <span className="text-sm font-medium">Admin</span>
+            <span className="text-sm font-medium">Администрирование</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Analytics Section */}
+      <div className="p-4 border-b border-gray-700">
+        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Analytics</h3>
+        <div className="space-y-2">
+          <button
+            onClick={() => setView('control-center')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'control-center'
+                  ? 'bg-blue-900/50 border border-blue-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <BarChart3 size={18} className={view === 'control-center' ? 'text-blue-400' : ''} />
+            <span className="text-sm font-medium">Центр управления</span>
+          </button>
+          <button
+            onClick={() => setView('goals')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'goals'
+                  ? 'bg-green-900/50 border border-green-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <Target size={18} className={view === 'goals' ? 'text-green-400' : ''} />
+            <span className="text-sm font-medium">Цели</span>
+          </button>
+          <button
+            onClick={() => setView('plan-memory')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'plan-memory'
+                  ? 'bg-purple-900/50 border border-purple-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <Layers size={18} className={view === 'plan-memory' ? 'text-purple-400' : ''} />
+            <span className="text-sm font-medium">Память планов</span>
+          </button>
+          <button
+            onClick={() => setView('trace-timeline')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'trace-timeline'
+                  ? 'bg-cyan-900/50 border border-cyan-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <ClockIcon size={18} className={view === 'trace-timeline' ? 'text-cyan-400' : ''} />
+            <span className="text-sm font-medium">Трассировка</span>
+          </button>
+          <button
+            onClick={() => setView('capabilities')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'capabilities'
+                  ? 'bg-orange-900/50 border border-orange-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <Zap size={18} className={view === 'capabilities' ? 'text-orange-400' : ''} />
+            <span className="text-sm font-medium">Возможности</span>
+          </button>
+          <button
+            onClick={() => setView('evolution')}
+            className={`
+              w-full flex items-center gap-2 px-3 py-2 rounded-lg transition-all
+              ${
+                view === 'evolution'
+                  ? 'bg-pink-900/50 border border-pink-500 text-white'
+                  : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }
+            `}
+          >
+            <Activity size={18} className={view === 'evolution' ? 'text-pink-400' : ''} />
+            <span className="text-sm font-medium">Эволюция</span>
           </button>
         </div>
       </div>
 
       {/* Mode Selector */}
       <div className="p-4 border-b border-gray-700">
-        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Thinking Mode</h3>
+        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Режим мышления</h3>
         <div className="space-y-2">
           {modes.map((m) => (
             <button
@@ -324,7 +423,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-gray-400 text-xs uppercase font-bold flex items-center gap-2">
             <Filter size={14} />
-            Filters
+            Фильтры
           </h3>
           <span className="text-gray-500 text-xs">
             {filteredCount}/{totalCount}
@@ -416,7 +515,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
 
       {/* Overlay Selector */}
       <div className="p-4 border-b border-gray-700">
-        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">View Overlay</h3>
+        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Слой визуализации</h3>
         <div className="space-y-2">
           {overlays.map((o) => (
             <button
@@ -453,7 +552,7 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
 
       {/* Constraints */}
       <div className="p-4 border-b border-gray-700 flex-1">
-        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Constraints</h3>
+        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold">Ограничения</h3>
 
         {/* Ethics */}
         <div className="mb-4">
@@ -504,13 +603,9 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
         </div>
       </div>
 
-      {/* Override Controls */}
-      <div className="p-4">
-        <h3 className="text-gray-400 text-xs uppercase mb-3 font-bold flex items-center gap-2">
-          <Ban size={16} />
-          Override
-        </h3>
-
+{/* Override Controls */}
+      <div className="p-4 border-t border-gray-700">
+        <h3 className="text-gray-400 text-xs uppercase mb-2 font-bold">Переопределение</h3>
         <button
           onClick={() => setOverride(!override.enabled)}
           className={`
@@ -522,15 +617,35 @@ const ControlPanel: React.FC<ControlPanelProps> = ({ onToggleEmotionalLayer }) =
             }
           `}
         >
-          {override.enabled ? 'Override Active' : 'Enable Override'}
+          {override.enabled ? 'Переопределение активно' : 'Включить переопределение'}
         </button>
 
         {override.enabled && override.decisionId && (
           <div className="mt-2 text-xs text-gray-400">
-            Decision ID: {override.decisionId.slice(0, 8)}...
+            ID решения: {override.decisionId.slice(0, 8)}...
           </div>
         )}
       </div>
+
+      {/* Create Goal Button */}
+      <div className="p-4 border-t border-gray-700">
+        <button
+          onClick={() => setShowGoalModal(true)}
+          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors font-medium"
+        >
+          <Plus size={18} />
+          Создать цель
+        </button>
+      </div>
+
+      <GoalCreationModal
+        isOpen={showGoalModal}
+        onClose={() => setShowGoalModal(false)}
+        onSuccess={(goalId) => {
+          addToast({ title: 'Цель создана', message: `ID: ${goalId}`, type: 'success' });
+          addLog({ message: `Создана цель: ${goalId}`, type: 'complete', nodeId: 'system', nodeName: 'Система' });
+        }}
+      />
     </div>
   );
 };

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FileText, Eye, CheckCircle, XCircle, Clock, Download, ChevronDown, ChevronUp } from 'lucide-react';
+import { FileText, Eye, ChevronUp } from 'lucide-react';
 import { apiClient } from '../api/client';
 
 interface Artifact {
@@ -28,7 +28,7 @@ export const Artifacts: React.FC = () => {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const [_, setSelectedArtifact] = useState<Artifact | null>(null);
   const [artifactContent, setArtifactContent] = useState<string | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
   const [contentError, setContentError] = useState<string | null>(null);
@@ -82,19 +82,6 @@ export const Artifacts: React.FC = () => {
       setContentError(err instanceof Error ? err.message : 'Failed to load artifact content');
     } finally {
       setContentLoading(false);
-    }
-  };
-
-  const getStatusIcon = (status: string) => {
-    switch (status) {
-      case 'passed':
-        return <CheckCircle size={16} className="text-green-500" />;
-      case 'failed':
-        return <XCircle size={16} className="text-red-500" />;
-      case 'pending':
-        return <Clock size={16} className="text-yellow-500" />;
-      default:
-        return <Clock size={16} className="text-gray-500" />;
     }
   };
 

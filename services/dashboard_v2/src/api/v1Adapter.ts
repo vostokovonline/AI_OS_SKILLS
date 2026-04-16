@@ -6,7 +6,7 @@
 
 import { GoalNode, Node, GraphEdge } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 // V1 Goal interface from backend
 interface V1Goal {

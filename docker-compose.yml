@@ -72,6 +72,16 @@ services:
     volumes:
     - ./skills:/app/skills
     - /var/run/docker.sock:/var/run/docker.sock
+  dashboard_v2:
+    build: ./services/dashboard_v2
+    container_name: ns_dashboard_v2
+    depends_on:
+    - core
+    networks:
+    - ns_network
+    ports:
+    - "3000:80"
+    restart: always
   etcd:
     command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379
     container_name: ns_etcd

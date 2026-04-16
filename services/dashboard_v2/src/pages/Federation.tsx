@@ -7,7 +7,7 @@ import { occpApi, Node } from '../api/occpApi';
  */
 export const Federation: React.FC = () => {
   const [nodes, setNodes] = useState<Node[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [_, setLoading] = useState(true);
 
   useEffect(() => {
     loadNodes();
@@ -93,7 +93,7 @@ export const Federation: React.FC = () => {
 
         <div className="p-6">
           <div className="flex flex-col items-center gap-8">
-            {nodes.map((node, idx) => (
+            {nodes.map((node) => (
               <div key={node.node_id} className="flex items-center gap-8">
                 {/* Node */}
                 <div className={`flex items-center gap-4 p-4 border-2 rounded-lg ${getStatusColor(node.status)}`}>
