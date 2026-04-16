@@ -26,10 +26,10 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
   const [error, setError] = useState<string | null>(null);
 
   const goalTypes = [
-    { value: 'achievable', label: 'Achievable', icon: Target, description: 'Clear success criteria' },
-    { value: 'continuous', label: 'Continuous', icon: Zap, description: 'Ongoing improvement' },
-    { value: 'directional', label: 'Directional', icon: Layers, description: 'Values and principles' },
-    { value: 'exploratory', label: 'Exploratory', icon: AlertCircle, description: 'Research and discovery' },
+    { value: 'achievable', label: 'Достижимая', icon: Target, description: 'Чёткие критерии успеха' },
+    { value: 'continuous', label: 'Непрерывная', icon: Zap, description: 'Постоянное улучшение' },
+    { value: 'directional', label: 'Направляющая', icon: Layers, description: 'Ценности и принципы' },
+    { value: 'exploratory', label: 'Исследовательская', icon: AlertCircle, description: 'Поиск и открытия' },
   ];
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -62,7 +62,7 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
       
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create goal');
+      setError(err instanceof Error ? err.message : 'Ошибка при создании цели');
     } finally {
       setLoading(false);
     }
@@ -80,8 +80,8 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
               <Plus size={20} className="text-white" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-white">Create New Goal</h2>
-              <p className="text-sm text-gray-400">Define a new objective for the system</p>
+              <h2 className="text-lg font-bold text-white">Создать новую цель</h2>
+              <p className="text-sm text-gray-400">Определите новую цель для системы</p>
             </div>
           </div>
           <button
@@ -102,33 +102,33 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
-              Goal Title *
+              Название цели *
             </label>
             <input
               type="text"
               value={formData.title}
               onChange={(e) => setFormData({ ...formData, title: e.target.value })}
               className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-500"
-              placeholder="e.g., Optimize database queries"
+              placeholder="например, Оптимизировать запросы к БД"
               required
             />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-1">
-              Description
+              Описание
             </label>
             <textarea
               value={formData.description}
               onChange={(e) => setFormData({ ...formData, description: e.target.value })}
               className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:border-purple-500 h-24 resize-none"
-              placeholder="Describe what this goal aims to achieve..."
+              placeholder="Опишите, чего должна достичь эта цель..."
             />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-gray-300 mb-2">
-              Goal Type
+              Тип цели
             </label>
             <div className="grid grid-cols-2 gap-2">
               {goalTypes.map((type) => (
@@ -157,34 +157,34 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
           <div className="flex gap-4">
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Domain
+                Область
               </label>
               <select
                 value={formData.domain}
                 onChange={(e) => setFormData({ ...formData, domain: e.target.value })}
                 className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
               >
-                <option value="general">General</option>
-                <option value="programming">Programming</option>
-                <option value="research">Research</option>
-                <option value="operations">Operations</option>
-                <option value="analytics">Analytics</option>
+                <option value="general">Общая</option>
+                <option value="programming">Программирование</option>
+                <option value="research">Исследование</option>
+                <option value="operations">Операции</option>
+                <option value="analytics">Аналитика</option>
               </select>
             </div>
 
             <div className="flex-1">
               <label className="block text-sm font-medium text-gray-300 mb-1">
-                Priority
+                Приоритет
               </label>
               <select
                 value={formData.priority}
                 onChange={(e) => setFormData({ ...formData, priority: e.target.value })}
                 className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:border-purple-500"
               >
-                <option value="low">Low</option>
-                <option value="normal">Normal</option>
-                <option value="high">High</option>
-                <option value="urgent">Urgent</option>
+                <option value="low">Низкий</option>
+                <option value="normal">Обычный</option>
+                <option value="high">Высокий</option>
+                <option value="urgent">Срочный</option>
               </select>
             </div>
           </div>
@@ -198,7 +198,7 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
               className="w-4 h-4 rounded border-gray-600 text-purple-500 focus:ring-purple-500 bg-gray-700"
             />
             <label htmlFor="is_atomic" className="text-sm text-gray-300">
-              Create as atomic goal (single action, verifiable result)
+              Создать как атомарную цель (одно действие, проверяемый результат)
             </label>
           </div>
 
@@ -208,14 +208,14 @@ export const GoalCreationModal: React.FC<GoalCreationModalProps> = ({ isOpen, on
               onClick={onClose}
               className="flex-1 px-4 py-2 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition-colors"
             >
-              Cancel
+              Отмена
             </button>
             <button
               type="submit"
               disabled={loading || !formData.title}
               className="flex-1 px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {loading ? 'Creating...' : 'Create Goal'}
+              {loading ? 'Создание...' : 'Создать цель'}
             </button>
           </div>
         </form>
