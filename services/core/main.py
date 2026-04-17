@@ -425,8 +425,13 @@ async def chat_sync(req: MessageCreate):
             await db.commit()
 
         # Получаем модель из переменных окружения
-        # groq сломана - используем deepseek-reasoner
-        model = os.getenv("LLM_MODEL", "deepseek-reasoner")
+        # groq сломана - используем только работающие модели
+        model = os.getenv("LLM_MODEL", "qwen2.5-coder")
+        
+        # Fallback для моделей которые не работают в LiteLLM
+        if model in ["deepseek-reasoner", "qwen3-coder:480b-cloud", "qwen3.5", "gemma4", "minimax", "glm-4", "glm-5", "kimi-k2.5"]:
+            model = "qwen2.5-coder"
+            logger.info(f"LLM fallback: switched to {model}")
 
         # Вызываем LLM синхронно с контекстом
         result = await chat_with_fallback(model=model, messages=messages)

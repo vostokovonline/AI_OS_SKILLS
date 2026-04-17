@@ -119,10 +119,10 @@ class LLMFallbackManager:
         # Проверяем если это Groq модель и она в cooldown
         is_groq_model = "groq" in model.lower()
         
-        # groq сломана - всегда используем deepseek-reasoner
-        if is_groq_model or "qwen3" in model:
-            logger.info(f"⚠️ Using deepseek-reasoner (groq broken)")
-            model = "deepseek-reasoner"
+        # groq сломана - используем только работающие модели
+        if is_groq_model or "qwen3" in model or model in ["deepseek-reasoner", "minimax", "glm-", "kimi", "gemma4"]:
+            logger.info(f"⚠️ Using qwen2.5-coder (broken models fallback)")
+            model = "qwen2.5-coder"
             kwargs.pop("api_base", None)  # Remove custom api_base
 
         # Выполняем запрос через litellm
