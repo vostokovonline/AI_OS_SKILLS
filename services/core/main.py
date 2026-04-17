@@ -208,6 +208,32 @@ async def startup():
     configure_dispatcher(celery_app)
     logger.info("✓ GoalDispatcher configured")
     
+    # Start scheduler in background thread (non-blocking)
+    import threading
+    import time
+    from scheduler import start_scheduler
+    
+    def start_scheduler_with_logging():
+        try:
+            logger.info("Starting scheduler in background thread...")
+            start_scheduler()
+            logger.info("Scheduler started successfully in background thread")
+        except Exception as e:
+            logger.error(f"Scheduler failed to start: {e}")
+    
+    scheduler_thread = threading.Thread(target=start_scheduler_with_logging, daemon=False)
+    scheduler_thread.start()
+    
+    # Wait a bit for scheduler to initialize
+    time.sleep(2)
+    
+    # Check if scheduler started
+    from scheduler import scheduler as sched
+    if sched.running:
+        logger.info(f"✓ Scheduler running with {len(sched.get_jobs())} jobs")
+    else:
+        logger.warning("⚠ Scheduler not running after 2s - will retry in API calls")
+    
     # v3.0: Inject arbitration components into API endpoints
     from scheduler import _get_use_cases
     use_cases = _get_use_cases()

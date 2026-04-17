@@ -1,7 +1,8 @@
 import uuid
 import asyncio
 from uuid import UUID
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+# Use BackgroundScheduler instead of AsyncIOScheduler for thread-safe operation
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from tasks import run_cron_task
 from resource_manager import SystemMonitor
@@ -12,7 +13,8 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-scheduler = AsyncIOScheduler()
+# BackgroundScheduler works without event loop - perfect for threading
+scheduler = BackgroundScheduler()
 monitor = SystemMonitor()
 
 
@@ -429,6 +431,13 @@ def start_scheduler():
 
     Примечание: Имена функций НЕ изменились для обратной совместимости.
     """
+    # IMPORTANT: Remove any existing jobs before adding new ones
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    
+    # Clear all jobs from previous runs
+    scheduler.remove_all_jobs()
+    
     # Регистрируем event handlers
     _setup_event_handlers()
     _setup_execution_event_handlers()  # Register dependency resolution handlers
