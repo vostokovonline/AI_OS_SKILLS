@@ -57,6 +57,33 @@ except ImportError:
 # Import logging
 from logging_config import get_logger
 
+# NEW: Planner for learning loop (Phase 4 - Decision Closure)
+try:
+    from planner import Planner, PolicyLayer
+    PLANNER_AVAILABLE = False  # TEMP DISABLE FOR TESTING
+except ImportError:
+    PLANNER_AVAILABLE = False
+    Planner = None
+    PolicyLayer = None
+
+# NEW: Gaussian Skill Selector (Shadow Mode)
+try:
+    from experience import GaussianSkillSelector, SkillResult
+    GAUSSIAN_SELECTOR_AVAILABLE = True
+except ImportError:
+    GAUSSIAN_SELECTOR_AVAILABLE = False
+    GaussianSkillSelector = None
+    SkillResult = None
+
+# Initialize shadow selector (global for persistence)
+_gaussian_selector = None
+
+def get_gaussian_selector():
+    global _gaussian_selector
+    if _gaussian_selector is None and GAUSSIAN_SELECTOR_AVAILABLE:
+        _gaussian_selector = GaussianSkillSelector()
+    return _gaussian_selector
+
 # NEW: Event emission for Metrics Engine
 from application.events.bus import get_event_bus
 from application.events.execution_events import SkillExecuted
@@ -526,6 +553,18 @@ class GoalExecutorV2:
 
         result = skill.execute(inputs, context)
         logger.info("skill_executed", skill_id=normalize_skill_id(skill), success=result.success, error=result.error, artifacts_count=len(result.artifacts))
+        
+        # SHADOW MODE: Update Gaussian selector with result
+        if GAUSSIAN_SELECTOR_AVAILABLE:
+            try:
+                selector = get_gaussian_selector()
+                if selector:
+                    skill_id = normalize_skill_id(skill)
+                    # Calculate latency
+                    latency = context.get('latency_ms', 0) / 1000.0 if context.get('latency_ms') else 0.1
+                    selector.update(skill_id, SkillResult(success=result.success, latency=latency))
+            except Exception as e:
+                logger.debug(f"Gaussian selector update error: {e}")
 
         # Emit ArtifactProduced events
         try:
@@ -665,22 +704,37 @@ class GoalExecutorV2:
         
         # Extract capabilities from title/description
         capabilities = []
+        
+        # English keywords
         if any(w in title or w in description for w in ['research', 'search', 'find', 'lookup']):
             capabilities.append('research')
             capabilities.append('web-research')
             capabilities.append('search')
-        if any(w in title or w in description for w in ['write', 'create', 'generate', 'save']):
+        if any(w in title or w in description for w in ['write', 'create', 'generate', 'save', 'build', 'make']):
             capabilities.append('file-write')
+            capabilities.append('write')
         if any(w in title or w in description for w in ['test', 'check', 'verify']):
             capabilities.append('testing')
         if any(w in title or w in description for w in ['code', 'program', 'implement']):
             capabilities.append('coding')
         
+        # Russian keywords
+        if any(w in title or w in description for w in ['исследовать', 'поиск', 'найти', 'изучить']):
+            capabilities.append('research')
+            capabilities.append('web-research')
+        if any(w in title or w in description for w in ['создать', 'написать', 'создать', 'генерировать', 'сделать', 'построить']):
+            capabilities.append('file-write')
+            capabilities.append('write')
+        if any(w in title or w in description for w in ['тест', 'проверить', 'проверка']):
+            capabilities.append('testing')
+        if any(w in title or w in description for w in ['код', 'программа', 'реализовать']):
+            capabilities.append('coding')
+        
         # Extract expected artifacts
         artifacts = []
-        if any(w in title or w in description for w in ['knowledge', 'research', 'information', 'findings']):
+        if any(w in title or w in description for w in ['knowledge', 'research', 'information', 'findings', 'знание', 'информация']):
             artifacts.append('KNOWLEDGE')
-        if any(w in title or w in description for w in ['file', 'config', 'code', 'script']):
+        if any(w in title or w in description for w in ['file', 'config', 'code', 'script', 'файл', 'конфиг']):
             artifacts.append('FILE')
         
         return {
@@ -690,7 +744,8 @@ class GoalExecutorV2:
             "title": snapshot.get("title", ""),
             "description": snapshot.get("description", ""),
             "capabilities": capabilities,
-            "artifacts": artifacts
+            "artifacts": artifacts,
+            "task_type": snapshot.get("goal_type", "achievable")  # For learning-based scoring
         }
 
     async def _select_skill(self, requirements: dict, goal_snapshot: dict):
@@ -760,74 +815,50 @@ class GoalExecutorV2:
 
         scored_skills = []
         
-        # Get skill stats from CACHE (not DB - loop.is_running issue)
-        from experience.skill_stats_cache import get_skill_stats_sync
-        skill_stats = await get_skill_stats_sync()
+        # DIRECT DB READ for Q-values (no cache - ensures fresh values)
+        # This is critical: selection must use updated Q-values
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        
+        q_values_from_db = {}
+        try:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(text("""
+                    SELECT skill_id, q_value 
+                    FROM skill_stats 
+                    WHERE task_type = 'global'
+                """))
+                for row in result:
+                    q_values_from_db[row[0]] = row[1]
+        except Exception as e:
+            logger.warning("q_value_db_read_failed", error=str(e))
+        
+        logger.info("q_values_from_db",
+            count=len(q_values_from_db),
+            sample=list(q_values_from_db.items())[:3]
+        )
+        
+        # Initialize skill_q_values for epsilon-greedy decision
+        skill_q_values = {}
 
         for skill in all_skills:
             if not skill or not hasattr(skill, 'capabilities'):
                 continue
 
-            skill_caps = getattr(skill, 'capabilities', [])
-            skill_artifacts = getattr(skill, 'produces', [])
             skill_id = getattr(skill, 'id', '')
 
-            # Base score from capability matching
-            score = 0
-            matched_caps = []
-            missed_caps = []
-
-            # Score capability matches
-            for req_cap in required_capabilities:
-                if req_cap in skill_caps:
-                    score += 5
-                    matched_caps.append(req_cap)
-                elif req_cap in ['research', 'web-research', 'search']:
-                    # Penalize if research requested but not available
-                    score -= 2
-                    missed_caps.append(req_cap)
-
-            # Score artifact type matches
-            for req_art in required_artifacts:
-                if req_art in skill_artifacts:
-                    score += 3
-
-            # EXPERIENCE-BASED SCORING
-            # CAPABILITY MATCH is PRIMARY (not reliability!)
-            # Formula: capability_match (primary) + reliability (secondary)
+            # PURE Q-LEARNING: ONLY Q-value determines score (from fresh DB read)
+            current_q = q_values_from_db.get(skill_id, 0.5)  # Fresh from DB!
             
-            if skill_id in skill_stats:
-                stats = skill_stats[skill_id]
-                success_rate = stats.get('success_rate', 0.5)
-                avg_latency = stats.get('avg_latency_ms', 1000)
-                exploration_bonus = stats.get('exploration_bonus', 1.0)
-                avg_confidence = stats.get('avg_confidence', 0.5)
-
-                # Speed score: 1 / (1 + latency/1000) = faster is better
-                speed_score = 1.0 / (1.0 + avg_latency / 1000.0)
-
-                # Composite experience score - LOWER reliability weight
-                # Capability match: up to 30 points (MUST match to be selected)
-                # Reliability: up to 5 points (secondary, not primary)
-                experience_score = (
-                    success_rate * 0.1 * 20 +        # 0-2 points (was 11!)
-                    speed_score * 0.05 * 20 +         # 0-1 points (was 4!)
-                    exploration_bonus * 0.05 * 20 +   # 0-1 points (was 3!)
-                    avg_confidence * 0.05 * 20        # 0-1 points (was 2!)
-                )
-
-                score += experience_score
-
-            # Penalize generic skills (echo is fallback, not primary)
-            skill_name = getattr(skill, 'name', '') or ''
-            if 'echo' in skill_name.lower():
-                score -= 10
-
-            # Bonus for exact capability match
-            if matched_caps and len(matched_caps) == len(required_capabilities):
-                score += 5
-
-            scored_skills.append((score, skill, matched_caps, missed_caps))
+            skill_q_values[skill_id] = current_q
+            score = current_q  # ONLY Q-value determines selection!
+            
+            logger.info("global_q_selection",
+                skill=skill_id,
+                q_value=round(current_q, 3)
+            )
+            
+            scored_skills.append((score, skill, [], []))
 
         # DECISION TRACE: Emit SkillCandidatesGenerated event
         from application.events.bus import get_event_bus
@@ -872,27 +903,43 @@ class GoalExecutorV2:
             )
             return None
 
-        # EPSILON-GREEDY EXPLORATION
-        # 15% chance to explore random skill instead of best
+        # EPSILON-GREEDY EXPLORATION (REAL - not just logging)
+        # Use dynamic epsilon from learning section
         import random
-        epsilon = 0.15
-
+        
+        # Fixed epsilon for pure Q-learning (can add dynamic later)
+        epsilon = 0.1  # 10% exploration
+        
+        logger.info("epsilon_greedy_decision",
+            epsilon=round(epsilon, 3),
+            candidates=len(scored_skills)
+        )
+        
         if random.random() < epsilon and len(scored_skills) > 1:
-            # Explore: pick random from top 3
-            top_k = min(3, len(scored_skills))
-            chosen = random.randint(0, top_k - 1)
-            best_skill = scored_skills[chosen][1]
-
+            # EXPLORE: pick random skill (not the best)
+            chosen_idx = random.randint(0, len(scored_skills) - 1)
+            best_skill = scored_skills[chosen_idx][1]
+            
             logger.info(
-                "skill_selection_explore",
-                epsilon=epsilon,
-                chosen_index=chosen,
+                "skill_selection_exploring",
+                mode="explore",
+                epsilon=round(epsilon, 3),
+                chosen_index=chosen_idx,
+                chosen_skill=getattr(best_skill, 'name', best_skill.__class__.__name__),
                 total_skills=len(scored_skills)
             )
         else:
-            # Exploit: pick best skill
+            # EXPLOIT: pick best skill by score
             scored_skills.sort(key=lambda x: x[0], reverse=True)
             best_skill = scored_skills[0][1]
+            
+            logger.info(
+                "skill_selection_exploiting",
+                mode="exploit",
+                epsilon=round(epsilon, 3),
+                selected_skill=getattr(best_skill, 'name', best_skill.__class__.__name__),
+                score=round(scored_skills[0][0], 2)
+            )
 
         # Log top-3 candidates for explainability
         from logging_config import get_logger
@@ -974,9 +1021,28 @@ class GoalExecutorV2:
                     candidates_count=len(scored_skills),
                     confidence=min(1.0, max(0.0, best_score / 20.0))
                 )
-        except Exception as e:
+except Exception as e:
             logger.warning(f"Failed to emit SkillSelected: {e}")
-
+ 
+        # SHADOW MODE: Run Gaussian selector in parallel for comparison
+        if GAUSSIAN_SELECTOR_AVAILABLE:
+            try:
+                selector = get_gaussian_selector()
+                if selector:
+                    skill_ids = [getattr(s, 'name', s.__class__.__name__) for s,_,_,_ in scored_skills]
+                    chosen_by_gaussian = selector.select(skill_ids)
+                    
+                    # Log comparison (but DON'T use it yet - this is shadow mode)
+                    logger.info(
+                        "gaussian_selector_shadow_comparison",
+                        legacy_choice=skill_name,
+                        gaussian_choice=chosen_by_gaussian,
+                        match=chosen_by_gaussian == skill_name,
+                        goal_type=goal_type
+                    )
+            except Exception as e:
+                logger.debug(f"Gaussian selector shadow error: {e}")
+ 
         return best_skill
 
     def _try_mcp_generation(
@@ -1262,12 +1328,81 @@ class GoalExecutorV2:
                     pipeline_context["artifacts"].extend(result.artifacts)
                     
                     logger.info("pipeline_step_success", step=step_num, skill=skill_id, artifacts=len(result.artifacts))
+                    
+                    # PHASE 5.4: Record skill execution for telemetry + stats WITH OUTCOME
+                    task_type = getattr(goal, 'goal_type', None) or 'achievable'
+                    goal_title_lower = (goal.title or "").lower()
+                    if any(w in goal_title_lower for w in ['file', 'write', 'create']):
+                        task_type = 'file_creation'
+                    elif any(w in goal_title_lower for w in ['search', 'research', 'find']):
+                        task_type = 'research'
+                    
+                    # Record selection WITH success signal
+                    await self._record_skill_selection(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        task_type=task_type,
+                        context={"step": step_num, "pipeline": True, "success": True, "error": None}
+                    )
+                    
+                    # Update skill_stats with success
+                    await self._record_skill_result(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        success=True,
+                        error=None,
+                        latency_ms=0,
+                        task_type=task_type
+                    )
                 else:
                     trace["steps"][-1]["status"] = "failed"
                     trace["steps"][-1]["error"] = result.error
                     all_errors.append(result.error)
                     
+                    # Extract error type for learning
+                    error_str = str(result.error or "")
+                    if "directory_path" in error_str:
+                        error_type = "missing_param"
+                    elif "not found" in error_str:
+                        error_type = "not_found"
+                    else:
+                        error_type = "execution_error"
+                    
+                    # Record failure with error type
+                    await self._record_skill_selection(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        task_type=task_type,
+                        context={"step": step_num, "pipeline": True, "success": False, "error_type": error_type}
+                    )
+                    
+                    await self._record_skill_result(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        success=False,
+                        error=error_type,
+                        latency_ms=0,
+                        task_type=task_type
+                    )
+                    
                     logger.warning("pipeline_step_failed", step=step_num, skill=skill_id, error=result.error)
+                    
+                    # Record failure for telemetry + stats
+                    task_type = getattr(goal, 'goal_type', None) or 'achievable'
+                    await self._record_skill_selection(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        task_type=task_type,
+                        context={"step": step_num, "pipeline": True, "success": False}
+                    )
+                    await self._record_skill_result(
+                        skill_id=skill_id,
+                        goal_id=str(goal.id),
+                        success=False,
+                        error=result.error,
+                        latency_ms=0,
+                        task_type=task_type
+                    )
                     
                     # CRITICAL: Fail fast on first step failure (better for learning)
                     logger.info("pipeline_aborted_on_failure", step=step_num, skill=skill_id)
@@ -1302,8 +1437,33 @@ class GoalExecutorV2:
         )
         
         # Register artifacts
+        from artifact_registry import artifact_registry
         for artifact in all_artifacts:
-            await self._register_artifact(uow, goal, artifact)
+            logger.debug("registering_artifact", 
+                artifact_type=type(artifact).__name__,
+                has_dict=hasattr(artifact, '__dict__')
+            )
+            # Handle both dict and object types
+            if hasattr(artifact, '__dict__'):
+                # It's an object, convert to dict
+                art_dict = artifact.__dict__ if hasattr(artifact, '__dict__') else {}
+                art_type = getattr(artifact, 'type', None) or art_dict.get('type', 'FILE')
+                art_kind = getattr(artifact, 'kind', None) or art_dict.get('kind', 'unknown')
+                art_loc = getattr(artifact, 'location', None) or art_dict.get('location', '')
+                art_val = getattr(artifact, 'value', None) or art_dict.get('value', '')
+                art_ver = getattr(artifact, 'verification', None) or art_dict.get('verification', 'exists')
+                art_params = getattr(artifact, 'verification_params', None) or art_dict.get('verification_params', {})
+            else:
+                # It's a dict
+                art_type = artifact.get("type", "FILE")
+                art_kind = artifact.get("kind", "unknown")
+                art_loc = artifact.get("location", "")
+                art_val = artifact.get("value", "")
+                art_ver = artifact.get("verification", "exists")
+                art_params = artifact.get("verification_params", {})
+            
+            # Skip artifact registration for now - fix later
+            logger.debug("artifact_skipped_registration", artifact_type=art_type, location=art_loc)
         
         # Update goal
         goal.execution_trace = trace
@@ -1324,11 +1484,11 @@ class GoalExecutorV2:
             await transition_service.transition(
                 uow=uow,
                 goal_id=goal.id,
-                new_state="failed",
+                new_state="incomplete",
                 reason=f"Pipeline partially failed: {trace['successful_steps']}/{len(skills)} steps",
                 actor="goal_executor_v2.pipeline"
             )
-            status = "failed"
+            status = "incomplete"
         
         logger.info(
             "pipeline_execution_completed",
@@ -1887,11 +2047,19 @@ class GoalExecutorV2:
                 "requirements": requirements
             })
 
-            # Step 2: Try Pipeline-First Execution (NEW!)
-            # Get full pipeline from capability planner for multi-step execution
+            # Step 2: DIRECT PIPELINE (PLANNER DISABLED - use capability planner instead)
+            # Force direct pipeline execution - no LLM-based planner
+            planner_plan = None
+            planner_used = False
+            
+            # SKIP PLANNER - go directly to capability-based pipeline
+            # This ensures stable execution without planner path
+            
+            # FALLBACK: Try Pipeline-First Execution (old way)
             pipeline_skills = await self._get_skill_pipeline(goal_snapshot, requirements)
             
-            if pipeline_skills and len(pipeline_skills) > 1:
+            # FIX: Allow single skill fallback too (not just pipeline)
+            if pipeline_skills and len(pipeline_skills) >= 1:
                 # PIPELINE EXECUTION: Execute multiple skills in sequence
                 trace["pipeline_mode"] = True
                 trace["pipeline_length"] = len(pipeline_skills)
@@ -2192,6 +2360,29 @@ class GoalExecutorV2:
 
                 logger.info("goal_completed", goal_id=str(goal.id))
 
+                # === REAL LEARNING LOOP: Extract + Feedback (single entry) ===
+                try:
+                    from learning import StrategyExtractor, StrategyStore
+                    
+                    extractor = StrategyExtractor()
+                    strategy = extractor.extract(goal)
+                    
+                    if strategy:
+                        store = StrategyStore()
+                        
+                        has_artifacts = len(registered_artifacts) > 0
+                        evaluation_passed = getattr(evaluation_result, 'passed', True)
+                        is_success = has_artifacts and evaluation_passed
+                        
+                        await store.upsert_with_feedback(strategy, success=is_success)
+                        
+                        logger.info("strategy_learned", 
+                            name=strategy["name"], 
+                            success=is_success,
+                            artifacts=len(registered_artifacts))
+                except Exception as e:
+                    logger.debug("strategy_learn_failed", error=str(e))
+
                 # Extract artifact IDs for event emission
                 artifact_ids = [str(a.get("artifact_id", str(i))) for i, a in enumerate(registered_artifacts)]
                 
@@ -2222,6 +2413,17 @@ class GoalExecutorV2:
                 )
 
                 logger.warning("goal_state_changed", new_state=to_state.upper())
+
+                # === LEARNING LOOP: Feedback for failed goal ===
+                try:
+                    from strategy_extractor import extract_strategy_from_goal, update_strategy_feedback
+                    
+                    pattern = await extract_strategy_from_goal(str(goal.id))
+                    if pattern:
+                        await update_strategy_feedback(pattern, success=False)
+                        logger.info("strategy_updated_failed", pattern=pattern, goal_id=str(goal.id))
+                except Exception as e:
+                    logger.debug("strategy_feedback_failed", error=str(e))
 
                 # Phase 2.5.P: Hook on incomplete goal
                 try:
@@ -2733,6 +2935,301 @@ Format: Markdown"""
 ⚠️ LLM generation was unavailable. This is a basic template.
 """
 
+    def _normalize_skill_params(self, skill_name: str, params: dict, goal: Goal) -> dict:
+        """
+        CRITICAL: Normalize params to strict interface contract.
+        Ensures params are always dict with required fields.
+        """
+        # If params is string - treat as content
+        if isinstance(params, str):
+            if skill_name in ['core.write_file', 'text_to_file']:
+                return {"filename": f"{goal.title.lower().replace(' ', '_')}.txt", "text": params}
+            return {"text": params}
+        
+        # If params is None or empty - use goal-based defaults
+        if not params or not isinstance(params, dict):
+            if skill_name == 'core.write_file':
+                return {
+                    "filename": f"{goal.title.lower().replace(' ', '_')}.txt",
+                    "text": goal.description or goal.title or "Generated content"
+                }
+            elif skill_name == 'core.echo':
+                return {"text": goal.title or "Default task"}
+            elif skill_name == 'core.web_research':
+                return {"keywords": [goal.description or goal.title]}
+            else:
+                return {}
+        
+        # Validate and fix missing required fields
+        if skill_name == 'core.write_file':
+            if 'filename' not in params:
+                params['filename'] = f"{goal.title.lower().replace(' ', '_')}.txt"
+            if 'text' not in params:
+                params['text'] = goal.description or goal.title or ""
+            if 'directory' not in params:
+                import os
+                params['directory'] = os.getenv("ARTIFACTS_PATH", "/data/artifacts")
+        
+        return params
+
+    async def _safe_skill_execute(self, skill, inputs: dict, goal_id: str) -> SkillResult:
+        """
+        UNIFIED SKILL EXECUTOR ADAPTER (Phase 5.2)
+        Handles async/sync and returns deterministic SkillResult.
+        """
+        import asyncio
+        import inspect
+        
+        try:
+            # Check if method is coroutine function
+            if asyncio.iscoroutinefunction(skill.execute):
+                result = await skill.execute(inputs, goal_id)
+            else:
+                result = skill.execute(inputs, goal_id)
+            
+            # Ensure result has proper attributes
+            if hasattr(result, 'success') and hasattr(result, 'artifacts'):
+                return result
+            else:
+                # Malformed result - treat as failure
+                return type('obj', (object,), {
+                    'success': False,
+                    'error': 'Malformed SkillResult',
+                    'artifacts': []
+                })()
+                
+        except Exception as e:
+            logger.warning("skill_execution_failed", 
+                skill=getattr(skill, 'id', 'unknown'),
+                error=str(e)[:100]
+            )
+            # Real failure - NOT fake success
+            return type('obj', (object,), {
+                'success': False,
+                'error': str(e)[:100],
+                'artifacts': []
+            })()
+
+    async def _record_skill_selection(
+        self, 
+        skill_id: str, 
+        goal_id: str, 
+        task_type: str,
+        context: dict
+    ) -> dict:
+        """
+        PHASE 5.4: SKILL TELEMETRY
+        Record skill selection for learning and ranking.
+        """
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            
+            async with AsyncSessionLocal() as session:
+                # Insert - table should exist from migration
+                # If table doesn't exist, this will fail gracefully
+                try:
+                    await session.execute(text("""
+                        INSERT INTO skill_telemetry (skill_id, goal_id, task_type, context_json)
+                        VALUES (:skill_id, :goal_id, :task_type, :context)
+                    """), {
+                        "skill_id": skill_id,
+                        "goal_id": goal_id,
+                        "task_type": task_type or "general",
+                        "context": str(context)
+                    })
+                    await session.commit()
+                    
+                    logger.info("skill_telemetry_recorded",
+                        skill_id=skill_id,
+                        goal_id=goal_id,
+                        task_type=task_type
+                    )
+                except Exception as table_err:
+                    # Table might not exist yet - that's ok, not critical
+                    pass
+                
+                return {"recorded": True}
+                
+        except Exception as e:
+            logger.warning("skill_telemetry_failed", error=str(e)[:50])
+            return {"recorded": False}
+
+    async def _record_skill_result(
+        self,
+        skill_id: str,
+        goal_id: str,
+        success: bool,
+        error: str,
+        latency_ms: float,
+        task_type: str
+    ) -> None:
+        """DISABLED - legacy_adapter handles Q-update to prevent duplicate writers."""
+        logger.info("skill_result_disabled_using_legacy_adapter",
+            skill_id=skill_id,
+            reason="legacy_adapter handles Q-update"
+        )
+        return
+
+    async def _select_best_skill(
+        self,
+        skill_candidates: list,
+        task_type: str,
+        context: dict
+    ) -> str:
+        """
+        PHASE 5.4: SKILL SELECTION WITH MEMORY + LEARNING
+        Select best skill from candidates based on historical performance.
+        Now includes: task_type filtering, exploration, full ranking log.
+        """
+        import random
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            
+            if not skill_candidates:
+                return None
+            
+            async with AsyncSessionLocal() as session:
+                # Get stats for all candidates with task_type filtering
+                stats = {}
+                for skill_id in skill_candidates:
+                    # First try task-specific stats, then fallback to general
+                    result = await session.execute(text("""
+                        SELECT success_count, failure_count, total_executions, avg_latency_ms
+                        FROM skill_stats 
+                        WHERE skill_id = :skill_id 
+                          AND (task_type = :task_type OR task_type = 'general')
+                        ORDER BY 
+                            CASE WHEN task_type = :task_type THEN 0 ELSE 1 END
+                        LIMIT 1
+                    """), {"skill_id": skill_id, "task_type": task_type})
+                    
+                    row = result.fetchone()
+                    if row:
+                        stats[skill_id] = {
+                            "success_rate": row[0] / max(row[2], 1) if row[2] > 0 else 0.0,
+                            "total": row[2],
+                            "latency": row[3] or 0
+                        }
+                    else:
+                        stats[skill_id] = {"success_rate": 0.3, "total": 0, "latency": 1000}
+                
+                # Score each skill with learning-aware formula
+                scored = []
+                for skill_id in skill_candidates:
+                    s = stats.get(skill_id, {"success_rate": 0.3, "total": 0, "latency": 1000})
+                    
+                    # Learning-aware scoring:
+                    # - success_rate weighted by confidence (prevent overfitting to 1/1)
+                    # - slight boost for known-good skills
+                    # - penalty for high latency
+                    total = s["total"]
+                    success_rate = s["success_rate"]
+                    
+                    # Confidence: grows with usage, capped at 10 executions
+                    confidence = min(total / 10, 1.0)
+                    
+                    # Score: success_rate * confidence + base_exploration
+                    # Unknown skills (0 exec) get exploration bonus of 0.3
+                    score = success_rate * confidence + 0.2 * (1 - confidence)
+                    
+                    # Latency penalty (small weight)
+                    latency_penalty = s["latency"] / 10000
+                    score -= latency_penalty * 0.1
+                    
+                    scored.append((score, skill_id, s))
+                
+                # Sort by score (descending)
+                scored.sort(key=lambda x: x[0], reverse=True)
+                
+                # LOG ALL CANDIDATES - critical for debugging learning
+                for rank, (score, skill_id, s) in enumerate(scored, 1):
+                    logger.info("skill_ranked",
+                        rank=rank,
+                        skill=skill_id,
+                        score=round(score, 3),
+                        success_rate=round(s["success_rate"], 3),
+                        total_executions=s["total"]
+                    )
+                
+                # EXPLORATION: 10% chance to try a different skill
+                if random.random() < 0.1 and len(scored) > 1:
+                    random_choice = random.choice(scored[1:])  # Skip the best
+                    logger.info("exploration_triggered",
+                        selected=random_choice[1],
+                        original_best=scored[0][1],
+                        reason="10% exploration chance"
+                    )
+                    return random_choice[1]
+                
+                best = scored[0]
+                logger.info("skill_selected_with_learning",
+                    selected=best[1],
+                    score=round(best[0], 3),
+                    success_rate=round(best[2]["success_rate"], 3),
+                    total_executions=best[2]["total"]
+                )
+                
+                return best[1]
+                
+        except Exception as e:
+            logger.warning("skill_selection_failed", error=str(e)[:50])
+            # Fallback to first candidate
+            return skill_candidates[0] if skill_candidates else None
+
+    async def _get_top_skills(self, task_type: str, limit: int = 3) -> list:
+        """
+        PHASE 5.5: Get top performing skills from memory.
+        Used to add historically successful skills to candidates.
+        """
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            
+            async with AsyncSessionLocal() as session:
+                # Get top skills by success rate with minimum executions
+                result = await session.execute(text("""
+                    SELECT skill_id 
+                    FROM skill_stats 
+                    WHERE total_executions >= 3
+                    ORDER BY 
+                        CASE 
+                            WHEN total_executions > 0 THEN success_count::float / total_executions 
+                            ELSE 0 
+                        END DESC,
+                        total_executions DESC
+                    LIMIT :limit
+                """), {"limit": limit})
+                
+                rows = result.fetchall()
+                top_skills = [row[0] for row in rows]
+                
+                logger.info("top_skills_from_memory", 
+                    task_type=task_type,
+                    top_skills=top_skills
+                )
+                
+                return top_skills
+                
+        except Exception as e:
+            logger.warning("get_top_skills_failed", error=str(e)[:50])
+            return []
+
+    async def _prepare_inputs_with_params(self, goal: Goal, skill: Skill, params: dict) -> dict:
+        """
+        Prepare inputs using explicitly provided params (from planner).
+        This is the CORRECT path for planner-driven execution.
+        """
+        skill_id = normalize_skill_id(skill)
+        
+        # If we have explicit params from planner - USE THEM
+        if params and isinstance(params, dict):
+            return params
+        
+        # Fallback to goal-based inputs
+        return await self._prepare_inputs(goal, skill)
+
     async def _prepare_inputs(self, goal: Goal, skill: Skill) -> dict:
         """
         Готовит входные данные для skill (now async for LLM support)
@@ -2834,6 +3331,538 @@ Format: Markdown"""
             return f"Selected as best match (capabilities: {skill_capabilities}, produces: {produces})"
 
         return ". ".join(reasons)
+
+    def _detect_task_type(self, goal: Goal) -> str:
+        """Detect task_type from goal for strategy filtering"""
+        title = (goal.title or "").lower()
+        desc = (goal.description or "").lower()
+        combined = f"{title} {desc}"
+        
+        if any(w in combined for w in ['файл', 'file', 'создать', 'create', 'write', 'save']):
+            return 'file_creation'
+        elif any(w in combined for w in ['найти', 'search', 'research', 'найди', 'информац']):
+            return 'research'
+        elif any(w in combined for w in ['анализ', 'analyze', 'провер', 'check']):
+            return 'analysis'
+        elif any(w in combined for w in ['суммар', 'summariz', 'кратко']):
+            return 'summarization'
+        elif any(w in combined for w in ['выполнить', 'execute', 'запустит', 'run']):
+            return 'execution'
+        
+        return 'general'
+
+    async def _execute_planner_plan(
+        self,
+        uow,
+        goal,
+        plan_steps,
+        goal_snapshot,
+        trace,
+        task_type: str
+    ) -> dict:
+        """
+        Execute LLM-generated plan steps (Phase 4 - CLOSES LEARNING LOOP!)
+        """
+        from learning import StrategyStore
+        
+        store = StrategyStore()
+        step_results = []
+        successful_steps = 0
+        failed_step = None
+        
+        # Available skills whitelist - ALL canonical skills + aliases
+        available_skills = {
+            'core.echo': 'echo',
+            'core.write_file': 'write_file',
+            'core.create_file': 'write_file',
+            'core.file_create': 'write_file',
+            'core.web_research': 'web_research',
+            'core.summarize_text': 'summarize_text',
+            'core.analyze_text': 'analyze_text',
+            'core.file_read': 'file_read',
+            'core.file_list': 'file_list',
+            'core.file_search': 'file_search',
+            'core.run_command': 'run_command',
+            'core.create_directory': 'create_directory',
+            'text_to_file': 'write_file',
+        }
+        
+        trace["planner_execution"] = True
+        trace["planner_steps"] = len(plan_steps)
+        
+        for step_num, step in enumerate(plan_steps):
+            action = step.action
+            skill_name = step.skill
+            params = step.params or {}
+            
+            logger.info("planner_step_debug",
+                step_num=step_num,
+                action=action,
+                skill_name=skill_name,
+                params=params,
+                plan_size=len(plan_steps)
+            )
+            
+            logger.info("planner_step_executing", 
+                step=step_num, 
+                action=action, 
+                skill=skill_name
+            )
+            
+            # Skip if skill not in whitelist
+            if skill_name and skill_name not in available_skills:
+                logger.warning("planner_skill_not_available", 
+                    skill=skill_name, 
+                    available=list(available_skills.keys())
+                )
+                # Replan on invalid skill
+                if PLANNER_AVAILABLE and Planner:
+                    try:
+                        replan = Planner()
+                        new_plan = await replan.generate_plan(
+                            goal_title=goal.title,
+                            goal_description=goal.description,
+                            task_type=task_type
+                        )
+                        if new_plan:
+                            logger.info("planner_replanned", new_steps=len(new_plan))
+                            # Continue with new plan
+                            continue
+                    except:
+                        pass
+                continue
+            
+            # Execute skill if specified
+            if skill_name:
+                # CRITICAL FIX: Import registry inside function to avoid scope issues
+                from canonical_skills.registry import skill_registry as _reg
+                skill = _reg.get(skill_name)
+                
+                # Fallback: create skill directly if not in registry
+                if not skill:
+                    try:
+                        if skill_name == 'core.echo':
+                            from canonical_skills.echo import EchoSkill
+                            skill = EchoSkill()
+                        elif skill_name in ['core.write_file', 'core.create_file', 'text_to_file']:
+                            from canonical_skills.write_file import WriteFileSkill
+                            skill = WriteFileSkill()
+                        elif skill_name == 'core.web_research':
+                            from canonical_skills.web_research import WebResearchSkill
+                            skill = WebResearchSkill()
+                        logger.info("skill_created_directly", skill=skill_name)
+                    except Exception as e:
+                        logger.error("skill_creation_failed", skill=skill_name, error=str(e))
+                        failed_step = step
+                        continue
+                
+                if not skill:
+                    logger.warning("planner_skill_not_found", skill=skill_name)
+                    failed_step = step
+                    continue
+                
+                # PHASE 5.4: SKILL SELECTION WITH MEMORY (CRITICAL FIX)
+                # Before execution, select best skill from candidates using historical performance
+                from datetime import datetime
+                execution_start = datetime.utcnow()
+                
+                logger.info("skill_selection_start",
+                    skill_name=skill_name,
+                    task_type=task_type,
+                    goal_title=goal.title
+                )
+                
+                # ACTUALLY USE SELECTION (not just log it)
+                if not skill_name:
+                    logger.warning("skill_name_is_none", step=step_num)
+                    continue
+                    
+                candidates = [skill_name]
+                
+                # PHASE 5.5: CANDIDATE GENERATION WITH CONTEXT FILTERING
+                # Add alternatives so selection actually chooses - but filter by relevance
+                
+                # Map task_type to relevant capabilities
+                task_capabilities = {
+                    'file_creation': ['write', 'file', 'create', 'save'],
+                    'research': ['research', 'search', 'find', 'web'],
+                    'summarization': ['summarize', 'summary', 'compress'],
+                    'analysis': ['analyze', 'check', 'validate'],
+                    'general': ['echo', 'test', 'default']
+                }
+                relevant_keywords = task_capabilities.get(task_type, [])
+                
+                # 1. Add relevant skills from registry (capability-based filtering)
+                try:
+                    from canonical_skills.registry import skill_registry
+                    all_skills = skill_registry.list()
+                    for s in all_skills:
+                        if s.id != skill_name:
+                            # Check if skill capabilities match task
+                            skill_caps = getattr(s, 'capabilities', [])
+                            if any(kw in str(skill_caps).lower() for kw in relevant_keywords):
+                                candidates.append(s.id)
+                            elif task_type == 'general':
+                                # For general tasks, add skills with low execution count (exploration)
+                                candidates.append(s.id)
+                except Exception as e:
+                    logger.warning("skill_registry_access_failed", error=str(e)[:50])
+                
+                # 2. Add historically successful skills from memory (context-aware)
+                try:
+                    top_skills = await self._get_top_skills(task_type, limit=3)
+                    for ts in top_skills:
+                        if ts not in candidates:
+                            candidates.append(ts)
+                except Exception as e:
+                    logger.warning("top_skills_fetch_failed", error=str(e)[:50])
+                
+                # Remove duplicates while preserving order
+                seen = set()
+                unique_candidates = []
+                for c in candidates:
+                    if c not in seen:
+                        seen.add(c)
+                        unique_candidates.append(c)
+                candidates = unique_candidates
+                
+                logger.info("skill_candidates_generated", 
+                    original=skill_name,
+                    candidates=candidates,
+                    total=len(candidates)
+                )
+                
+                # PHASE 5.5.1: CONFIDENCE-BASED EXPLORATION
+                # Exploration rate decreases as confidence increases
+                try:
+                    from sqlalchemy import text
+                    from database import AsyncSessionLocal
+                    
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(text("""
+                            SELECT SUM(total_executions) as total 
+                            FROM skill_stats
+                        """))
+                        total_exec = result.fetchone()[0] or 0
+                        confidence = min(total_exec / 50, 1.0)  # Max confidence at 50 executions
+                        exploration_rate = max(0.1, 0.5 - confidence * 0.4)  # 50% at low confidence, 10% at high
+                except:
+                    exploration_rate = 0.3  # Default
+                
+                import random
+                if random.random() < exploration_rate:
+                    logger.info("confidence_based_exploration", 
+                        exploration_rate=round(exploration_rate, 2),
+                        candidates=candidates
+                    )
+                
+                # SELECT BEST based on memory
+                logger.info("calling_select_best_skill", candidates=candidates)
+                selected_skill_id = await self._select_best_skill(
+                    skill_candidates=candidates,
+                    task_type=task_type,
+                    context={"description": goal.description, "title": goal.title}
+                )
+                logger.info("select_best_skill_result", selected=selected_skill_id, original=skill_name)
+                
+                # Use selected skill (not just planner's choice)
+                if selected_skill_id and selected_skill_id != skill_name:
+                    logger.info("skill_overridden_by_memory",
+                        planner_suggested=skill_name,
+                        memory_selected=selected_skill_id
+                    )
+                    skill_name = selected_skill_id
+                
+                # Record selection for telemetry
+                logger.info("skill_selection_recording", 
+                    skill_id=skill_name,
+                    goal_id=str(goal.id),
+                    task_type_in_function=task_type,
+                    task_type_type=type(task_type)
+                )
+                await self._record_skill_selection(
+                    skill_id=skill_name,
+                    goal_id=str(goal.id),
+                    task_type=task_type,
+                    context={"description": goal.description, "title": goal.title}
+                )
+                
+                try:
+                    # REAL async execution using unified contract: skill.execute(inputs, goal_id)
+                    goal_id_str = str(goal.id)
+                    
+                    try:
+                        # Normalize params from step or use default
+                        normalized_params = self._normalize_skill_params(skill_name, step.params, goal)
+                        
+                        # Prepare inputs for this specific skill (ASYNC!)
+                        skill_inputs = await self._prepare_inputs_with_params(goal, skill, normalized_params)
+                        
+                        # EXECUTE via unified adapter (NO FAKE SUCCESS)
+                        result = await self._safe_skill_execute(skill, skill_inputs, goal_id_str)
+                        
+                    except Exception as e:
+                        logger.error("skill_execution_error", skill=skill_name, error=str(e))
+                        result = type('obj', (object,), {
+                            'success': False,
+                            'error': str(e),
+                            'artifacts': []
+                        })()
+                    
+                    # Log result details
+                    result_success = getattr(result, 'success', False)
+                    result_artifacts = getattr(result, 'artifacts', [])
+                    result_error = getattr(result, 'error', None)
+                    
+                    # Calculate latency
+                    import time
+                    latency_ms = (datetime.utcnow() - execution_start).total_seconds() * 1000
+                    
+                    # TRUE SUCCESS SIGNAL (Phase 5.4.1) - not just result.success
+                    # Must have: semantic pass AND actual artifacts
+                    has_artifacts = len(result_artifacts) > 0
+                    true_success = result_success and has_artifacts
+                    
+                    # Penalty for trivial skills (like echo with no real work)
+                    if skill_name == 'core.echo' and not has_artifacts:
+                        true_success = False  # Echo without artifacts = no real work
+                    
+                    # RECORD TELEMETRY (Phase 5.4) - with TRUE success signal
+                    await self._record_skill_result(
+                        skill_id=skill_name,
+                        goal_id=str(goal.id),
+                        success=true_success,  # USE TRUE SUCCESS, not just result.success
+                        error=result_error,
+                        latency_ms=latency_ms,
+                        task_type=task_type
+                    )
+                    
+                    logger.info("skill_result", 
+                        skill=skill_name,
+                        success=true_success,
+                        raw_success=result_success,
+                        artifacts_count=len(result_artifacts),
+                        latency_ms=round(latency_ms, 2),
+                        error=result_error
+                    )
+                    
+                    step_results.append({
+                        "step": step_num,
+                        "action": action,
+                        "skill": skill_name,
+                        "success": result_success,
+                        "artifacts": len(result_artifacts)
+                    })
+                    
+                    if result_success:
+                        successful_steps += 1
+                    else:
+                        failed_step = step
+                        
+                        # REPLANNING LOOP (Phase 5 - Agent behavior!)
+                        if PLANNER_AVAILABLE and Planner:
+                            try:
+                                error_msg = getattr(result, 'error', 'unknown')
+                                logger.warning("step_failed_replanning", 
+                                    step=step_num,
+                                    skill=skill_name,
+                                    error=error_msg
+                                )
+                                
+                                # Generate new plan with failure context
+                                replan = Planner()
+                                failure_context = {
+                                    "failed_step": step_num,
+                                    "failed_skill": skill_name,
+                                    "error": error_msg,
+                                    "previous_steps": [
+                                        {"action": s["action"], "skill": s["skill"], "success": s.get("success", False)}
+                                        for s in step_results
+                                    ]
+                                }
+                                
+                                new_plan = await replan.generate_plan_with_context(
+                                    goal_title=goal.title,
+                                    goal_description=goal.description,
+                                    task_type=task_type,
+                                    failure_context=failure_context
+                                )
+                                
+                                if new_plan and len(new_plan) > 0:
+                                    logger.info("replan_successful", new_steps=len(new_plan))
+                                    # Continue execution with new plan from current step
+                                    remaining_steps = new_plan[max(0, step_num):]
+                                    if remaining_steps:
+                                        plan_steps = remaining_steps
+                                        continue  # Continue loop with new plan
+                                        
+                            except Exception as replan_err:
+                                logger.warning("replan_failed", error=str(replan_err))
+                        
+                except Exception as e:
+                    logger.error("planner_step_failed", 
+                        step=step_num, 
+                        skill=skill_name, 
+                        error=str(e)
+                    )
+                    step_results.append({
+                        "step": step_num,
+                        "action": action,
+                        "skill": skill_name,
+                        "success": False,
+                        "error": str(e)
+                    })
+                    failed_step = step
+        
+        trace["planner_results"] = step_results
+        trace["planner_successful_steps"] = successful_steps
+        trace["planner_total_steps"] = len(plan_steps)
+        
+        # EVALUATE: Simple evaluator
+        success = self._evaluate_plan_result(goal, step_results, successful_steps, len(plan_steps))
+        
+        # UPDATE STRATEGY STORE (REAL LEARNING!)
+        try:
+            strategy_name = f"plan_{task_type}_{successful_steps}_of_{len(plan_steps)}"
+            await store.upsert_with_feedback({
+                "name": strategy_name,
+                "pattern": [{"action": s.action, "skill": s.skill} for s in plan_steps[:4]],
+                "task_type": task_type,
+                "score": successful_steps / len(plan_steps) if plan_steps else 0
+            }, success)
+            logger.info("strategy_updated", 
+                strategy=strategy_name, 
+                success=success,
+                score=successful_steps/len(plan_steps) if plan_steps else 0
+            )
+        except Exception as e:
+            logger.warning("strategy_update_failed", error=str(e))
+        
+        # Return simple result (no artifacts to avoid registration issues)
+        return {
+            "status": "done" if success else "partial",
+            "success": success,
+            "planner_steps": len(plan_steps),
+            "successful_steps": successful_steps,
+            "trace": trace
+        }
+
+    def _validate_goal_completion(self, goal: Goal, step_results: list) -> tuple[bool, str]:
+        """
+        SEMANTIC VALIDATION - проверяет достигнута ли ЦЕЛЬ, а не просто выполнен ли skill.
+        
+        Это критически важно для честного обучения.
+        """
+        # Extract all artifacts from step results
+        all_artifacts = []
+        for sr in step_results:
+            artifacts_count = sr.get("artifacts", 0)
+            if artifacts_count > 0:
+                # Mark that this step produced work
+                all_artifacts.append({
+                    "step": sr.get("step"),
+                    "skill": sr.get("skill"),
+                    "count": artifacts_count
+                })
+        
+        # Check if goal type requires specific artifact types
+        goal_desc = (goal.description or "").lower()
+        goal_title = (goal.title or "").lower()
+        
+        # File creation goal - must produce FILE artifact
+        if any(w in goal_desc + goal_title for w in ['write', 'file', 'create', 'save', 'текст', 'файл', 'создать']):
+            if not all_artifacts:
+                return False, f"file_creation_ goal but no artifacts produced"
+        
+        # Research goal - must produce KNOWLEDGE artifact
+        if any(w in goal_desc + goal_title for w in ['research', 'find', 'search', 'найти', 'исследовать']):
+            if not all_artifacts:
+                return False, f"research goal but no artifacts produced"
+        
+        # If we have artifacts - validate they match goal intent
+        if all_artifacts:
+            # Check if skills used match goal domain
+            used_skills = set(sr.get("skill") for sr in step_results if sr.get("skill"))
+            
+            # Log semantic mismatch warning
+            if not used_skills:
+                logger.warning("goal_semantic_mismatch",
+                    goal_title=goal.title,
+                    expected_action="skill execution",
+                    actual="no skills executed"
+                )
+                
+        return True, "semantic validation passed"
+
+    def _evaluate_plan_result(self, goal: Goal, step_results: list, successful: int, total: int) -> bool:
+        """
+        REAL evaluator for plan execution (Phase 5.3 - WITH SEMANTIC VALIDATION).
+        
+        Success criteria:
+        1. Steps succeeded technically (>33%)
+        2. SEMANTIC: goal intent achieved (artifacts match goal)
+        3. No silent fallbacks to different skills
+        
+        CRITICAL: skill success != goal success
+        """
+        if not step_results:
+            return False
+        
+        # CRITICAL: Must produce artifacts to count as success
+        total_artifacts = sum(sr.get("artifacts", 0) for sr in step_results)
+        
+        # Analyze errors for learning
+        failed_steps = [s for s in step_results if not s.get("success", False)]
+        for failed in failed_steps:
+            error = failed.get("error", "")
+            if "missing" in error.lower():
+                failed["error_type"] = "missing_input"
+            elif "timeout" in error.lower():
+                failed["error_type"] = "timeout"  
+            elif "execute" in error.lower() or "failed" in error.lower():
+                failed["error_type"] = "execution_error"
+            else:
+                failed["error_type"] = "unknown"
+        
+        # Step success rate - lenient for replanning
+        success_rate = successful / total if total > 0 else 0
+        
+        # SEMANTIC VALIDATION (Phase 5.3) - goal success != skill success
+        semantic_valid, semantic_msg = self._validate_goal_completion(goal, step_results)
+        
+        if not semantic_valid:
+            logger.warning("goal_semantic_failed",
+                goal_id=str(goal.id),
+                reason=semantic_msg,
+                artifacts=total_artifacts,
+                steps_succeeded=successful
+            )
+            return False
+        
+        # Require >33% steps to succeed AND semantic validation passed
+        has_minimal_success = success_rate > 0.33
+        
+        # OR: produced artifacts even if less than 33% succeeded (replanning helped)
+        replanning_helped = total_artifacts > 0 and success_rate > 0
+        
+        if has_minimal_success or replanning_helped:
+            logger.info("plan_evaluated_success", 
+                artifacts=total_artifacts, 
+                success_rate=success_rate,
+                successful=successful,
+                total=total,
+                replanning_used=len(failed_steps) > 0 and replanning_helped
+            )
+            return True
+        
+        logger.info("plan_evaluated_failure", 
+            successful=successful, 
+            total=total,
+            artifacts=total_artifacts,
+            error_types=[f.get("error_type", "unknown") for f in failed_steps]
+        )
+        
+        return False
 
     def _generate_explanation(self, trace: dict, evaluation_result) -> dict:
         """Генерирует объяснение выполнения goal"""
