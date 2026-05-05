@@ -19,6 +19,8 @@ engine = create_async_engine(
     echo=False,
     pool_pre_ping=True,              # Verify connections before use
     pool_recycle=3600,               # Recycle connections after 1 hour
+    pool_size=20,                    # Increased for higher concurrency
+    max_overflow=30,                 # Allow burst connections
 )
 
 # Async session factory

@@ -16,6 +16,8 @@ from semantic.embedding_service import (
     get_embedding_dimension,
 )
 from semantic.llm_router import LLMRouter, get_router, extract_json, llm_func
+from semantic.context_builder import ContextBuilder, get_context_builder
+from semantic.plan_memory import PlanMemory, get_plan_memory
 from semantic.planning_engine import (
     PlanningEngine,
     create_llm_engine,
@@ -25,6 +27,8 @@ from semantic.planning_engine import (
     TaskResult,
     ExecutionResult,
     CriticReport,
+    PlanValidator,
+    ExecutionValidator,
     Planner,
     LLMCritic,
     Replanner,
@@ -33,6 +37,12 @@ from semantic.planning_engine import (
     DECOMPOSE_PROMPT,
     CRITIC_PROMPT,
     REPLAN_PROMPT,
+)
+from semantic.execution_orchestrator import (
+    ExecutionOrchestrator,
+    ExecutionResult,
+    TelemetryEvent,
+    get_orchestrator,
 )
 
 __all__ = [
@@ -47,6 +57,12 @@ __all__ = [
     "get_router",
     "extract_json",
     "llm_func",
+    # Context Builder
+    "ContextBuilder",
+    "get_context_builder",
+    # Plan Memory
+    "PlanMemory",
+    "get_plan_memory",
     # Engine
     "PlanningEngine",
     "create_llm_engine",
@@ -56,6 +72,8 @@ __all__ = [
     "TaskResult",
     "ExecutionResult",
     "CriticReport",
+    "PlanValidator",
+    "ExecutionValidator",
     # Components
     "Planner",
     "LLMCritic",
@@ -66,4 +84,9 @@ __all__ = [
     "DECOMPOSE_PROMPT",
     "CRITIC_PROMPT",
     "REPLAN_PROMPT",
+    # Orchestrator
+    "ExecutionOrchestrator",
+    "ExecutionResult",
+    "TelemetryEvent",
+    "get_orchestrator",
 ]

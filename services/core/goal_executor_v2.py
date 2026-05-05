@@ -1021,12 +1021,12 @@ class GoalExecutorV2:
                     candidates_count=len(scored_skills),
                     confidence=min(1.0, max(0.0, best_score / 20.0))
                 )
-except Exception as e:
+        except Exception as e:
             logger.warning(f"Failed to emit SkillSelected: {e}")
- 
+
         # SHADOW MODE: Run Gaussian selector in parallel for comparison
-        if GAUSSIAN_SELECTOR_AVAILABLE:
-            try:
+        try:
+            if GAUSSIAN_SELECTOR_AVAILABLE:
                 selector = get_gaussian_selector()
                 if selector:
                     skill_ids = [getattr(s, 'name', s.__class__.__name__) for s,_,_,_ in scored_skills]
@@ -1040,9 +1040,9 @@ except Exception as e:
                         match=chosen_by_gaussian == skill_name,
                         goal_type=goal_type
                     )
-            except Exception as e:
-                logger.debug(f"Gaussian selector shadow error: {e}")
- 
+        except Exception as e:
+            logger.debug(f"Gaussian selector shadow error: {e}")
+
         return best_skill
 
     def _try_mcp_generation(

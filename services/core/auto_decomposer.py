@@ -392,8 +392,7 @@ async def create_decomposition_questions(goal: Goal, subgoals: List[Dict], db) -
     # Create session
     session = DecompositionSession(
         goal_id=goal.id,
-        goal_title=goal.title,
-        status="pending"
+        initiated_by="system"
     )
     db.add(session)
     await db.flush()

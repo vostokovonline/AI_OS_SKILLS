@@ -134,25 +134,6 @@ class Strategy:
         }
 
 
-class StrategyDB(Base):
-    """Database model for strategies"""
-    __tablename__ = "strategies"
-    
-    id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
-    name = Column(String(255), nullable=False, unique=True, index=True)
-    hypothesis = Column(Text, nullable=False)
-    expected_outcome = Column(JSON, nullable=False)
-    status = Column(String(50), default=StrategyStatus.HYPOTHESIS.value, index=True)
-    confidence = Column(Float, default=0.5)
-    linked_goals = Column(JSON, default=list)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    started_at = Column(DateTime, nullable=True)
-    evaluated_at = Column(DateTime, nullable=True)
-    evaluation_count = Column(Integer, default=0)
-    extra_data = Column(JSON, nullable=True)
-
-
-@dataclass
 class StrategyEvaluationResult:
     """Result of evaluating a strategy"""
     strategy_id: UUID

@@ -37,6 +37,20 @@ class Message(Base):
     content = Column(String)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+class Strategy(Base):
+    """Стратегии для целей"""
+    __tablename__ = "strategies"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    goals = relationship("Goal", back_populates="strategy")
+
+
 class Goal(Base):
     __tablename__ = "goals"
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -140,6 +154,7 @@ class Goal(Base):
     # STEP 3.1: Strategy Binding - Goal belongs to a strategy
     strategy_id = Column(UUID(as_uuid=True), ForeignKey("strategies.id"), nullable=True, index=True)
     # Links goal to the strategy it belongs to. NULL = no strategy (manual or ad-hoc goal)
+    strategy = relationship("Strategy", back_populates="goals")
 
     # Relationships
     children = relationship("Goal", backref=backref('parent', remote_side=[id]))

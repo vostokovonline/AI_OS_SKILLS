@@ -28,6 +28,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-cloud-reasoner}
       OPENAI_API_BASE: http://ns_litellm:4000/v1
       OPENAI_API_KEY: sk-1234
+      PURE_LEARNING_MODE: "true"
       # Execution V3 Feature Flags
       ENABLE_EXECUTION_V3: ${ENABLE_EXECUTION_V3:-false}
       EXECUTION_V3_PERCENTAGE: ${EXECUTION_V3_PERCENTAGE:-10}
@@ -40,6 +41,7 @@ services:
     restart: always
     volumes:
     - ./services/core:/app
+    - ./infra/artifacts:/data/artifacts
   core_worker:
     build: ./services/core
     command: celery -A tasks.celery_app worker --loglevel=info -Q default -c 8
@@ -57,6 +59,7 @@ services:
     - ns_network
     restart: always
     volumes:
+    - ./services/core:/app
     - ./skills:/app/skills
     - ./data/artifacts:/data/artifacts
   dashboard:
@@ -249,6 +252,7 @@ services:
   redis:
     container_name: ns_redis
     image: redis:7-alpine
+    command: redis-server --bind 0.0.0.0
     networks:
     - ns_network
     ports:
@@ -293,4 +297,57 @@ services:
     shm_size: 2gb
     volumes:
     - ./infra/browser_data:/app/browser_data
+
+  # Local Ollama for reliable LLM
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ns_ollama
+    ports:
+    - 11435:11434
+    volumes:
+    - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    networks:
+    - ns_network
+    restart: always
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ns_prometheus
+    user: root
+    ports:
+    - 9090:9090
+    volumes:
+    - ./infra/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - prometheus_data:/prometheus
+    command:
+    - '--config.file=/etc/prometheus/prometheus.yml'
+    - '--storage.tsdb.path=/prometheus'
+    networks:
+    - ns_network
+    restart: always
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ns_grafana
+    ports:
+    - 3001:3000
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+    - ./infra/grafana_data:/var/lib/grafana
+    networks:
+    - ns_network
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  ollama_data:
+  prometheus_data:
 version: '3.8'

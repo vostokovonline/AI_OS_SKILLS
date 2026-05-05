@@ -318,78 +318,571 @@ class PlanMemory:
     
     EPSILON = 0.25  # 25% exploration in exploit mode
     RECOVERY_BOOST = 0.3  # Boost for strategies that previously failed but might recover
+    
+    # Exploration parameters
+    EPSILON = 0.1  # 10% random exploration
+    DECAY_FACTOR = 0.99  # Old experience slowly decays
+    MIN_ALPHA = 0.5  # Minimum alpha to prevent total collapse
+    HYSTERESIS = 1.15  # Boost for continuing same strategy (15%)
+    MAX_REWARD_HISTORY = 50
+    
+    # Decision log
+    _decision_log: List[Dict] = []
+    _last_selected: Dict[str, str] = {}  # (context, goal) -> strategy
+    
+    # Goal profiles for multi-metric rewards + pipeline constraints
+    GOAL_PROFILES = {
+        "realtime_data": {
+            "success": 0.3,
+            "freshness": 0.5,
+            "latency": 0.15,
+            "cost": 0.05,
+            "quality": 0.5,
+            "max_cost": 2.0,
+            "max_latency": 4.0,
+        },
+        "cheap_query": {
+            "success": 0.3,
+            "freshness": 0.1,
+            "latency": 0.2,
+            "cost": 0.4,
+            "quality": 0.3,
+            "max_cost": 0.5,
+            "max_latency": 1.5,
+        },
+        "fast_response": {
+            "success": 0.3,
+            "freshness": 0.1,
+            "latency": 0.5,
+            "cost": 0.1,
+            "quality": 0.4,
+            "max_cost": 1.5,
+            "max_latency": 1.0,
+        },
+        "cheap_batch": {
+            "success": 0.4,
+            "freshness": 0.1,
+            "latency": 0.1,
+            "cost": 0.4,
+            "quality": 0.3,
+            "max_cost": 0.3,
+            "max_latency": 3.0,
+        },
+        "balanced": {
+            "success": 0.4,
+            "freshness": 0.2,
+            "latency": 0.2,
+            "cost": 0.2,
+            "quality": 0.5,
+            "max_cost": 1.5,
+            "max_latency": 3.0,
+        },
+        "default": {
+            "success": 0.4,
+            "freshness": 0.3,
+            "latency": 0.2,
+            "cost": 0.1,
+            "quality": 0.4,
+            "max_cost": 2.0,
+            "max_latency": 5.0,
+        },
+    }
+    
+    def compute_reward(
+        self,
+        result: Dict[str, Any],
+        context: Dict[str, Any] = None,
+        goal: str = "default"
+    ) -> Dict[str, float]:
+        """
+        Multi-metric reward with goal-aware weights AND penalties.
+        
+        Penalties enforce constraints - violation of goal priorities is punished,
+        not just weighted.
+        """
+        success = 1.0 if result.get("success", False) else 0.0
+        freshness = float(result.get("freshness", 0.0))
+        latency = float(result.get("latency", 1.0))
+        cost = float(result.get("cost", 1.0))
 
-    def select_strategy(self, strategies: List[str]) -> str:
-        # Thompson Sampling core: tick clock once per selection
-        self._iteration_count += 1
+        latency_score = max(0.0, 1.0 - latency)
+        cost_score = max(0.0, 1.0 - cost)
+
+        profile = self.GOAL_PROFILES.get(goal, self.GOAL_PROFILES["default"])
+
+        w_s = profile.get("success", 0.4)
+        w_f = profile.get("freshness", 0.3)
+        w_l = profile.get("latency", 0.2)
+        w_c = profile.get("cost", 0.1)
+
+        base_total = (
+            w_s * success +
+            w_f * freshness +
+            w_l * latency_score +
+            w_c * cost_score
+        )
+
+        cost_penalty = 0.0
+        latency_penalty = 0.0
+        penalty_details = {}
+
+        if goal == "cheap_query":
+            if cost > 0.5:
+                cost_penalty = -0.3 * (cost - 0.5) * 2
+                penalty_details["cost_violation"] = cost - 0.5
+            if cost > 0.7:
+                cost_penalty = -0.5
+
+        elif goal == "fast_response":
+            if latency > 0.5:
+                latency_penalty = -0.3 * (latency - 0.5) * 2
+                penalty_details["latency_violation"] = latency - 0.5
+            if latency > 0.7:
+                latency_penalty = -0.5
+
+        elif goal == "realtime_data":
+            if freshness < 0.5:
+                penalty_details["freshness_violation"] = 0.5 - freshness
+            if latency > 0.8:
+                latency_penalty = -0.2
+
+        elif goal == "cheap_batch":
+            if cost > 0.5:
+                cost_penalty = -0.4 * (cost - 0.5) * 2
+                penalty_details["cost_violation"] = cost - 0.5
+            if cost > 0.8:
+                cost_penalty = -0.6
+
+        total = base_total + cost_penalty + latency_penalty
+        total = max(0.0, total)
+
+        return {
+            "total": total,
+            "success": success,
+            "freshness": freshness,
+            "latency_score": latency_score,
+            "cost_score": cost_score,
+            "base_total": base_total,
+            "cost_penalty": cost_penalty,
+            "latency_penalty": latency_penalty,
+            "penalties": penalty_details,
+            "weights": profile,
+        }
+    
+    def explain_selection(self, strategy: str, context: Dict = None, goal: str = "default") -> Dict[str, Any]:
+        """Explain why a strategy was selected - returns alpha/beta + context + goal."""
+        key = self._get_strategy_key(strategy, context, goal)
+        stats = self._strategy_scores.get(key, {})
         
-        # PROBE MODE: Locked to single candidate - NO exploration allowed
-        if self._mode == "probe" and self._probe_candidate:
-            print(f"[PROBE] Probing: {self._probe_candidate}")
-            return self._probe_candidate
+        alpha = stats.get("alpha", 1.0)
+        beta = stats.get("beta", 1.0)
+        success_rate = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.5
         
-        # EXPLOIT MODE: Use Thompson Sampling (natural exploration via distribution)
-        if self._mode == "exploit" and self._locked_strategy:
-            if self._locked_strategy in strategies:
-                print(f"[EXPLOIT] Using locked: {self._locked_strategy}")
-                return self._locked_strategy
-            else:
-                print(f"[EXPLOIT] Strategy not available, explore mode")
-                self._mode = "explore"
-                self._locked_strategy = None
+        ctx_key = self.get_context_key(context)
         
-        # Thompson Sampling with Recency + Forced Re-exploration
+        profile = self.GOAL_PROFILES.get(goal, self.GOAL_PROFILES["default"])
+        
+        return {
+            "strategy": strategy,
+            "context": ctx_key,
+            "goal": goal,
+            "alpha": alpha,
+            "beta": beta,
+            "success_rate": success_rate,
+            "trials": stats.get("reward_count", 0),
+            "goal_weights": profile,
+            "reason": self._get_selection_reason(success_rate, stats.get("reward_count", 0)),
+        }
+    
+    def _get_selection_reason(self, success_rate: float, trials: int) -> str:
+        """Get human-readable reason for selection."""
+        if trials < 5:
+            return "exploring (low trials)"
+        elif success_rate > 0.8:
+            return "high success rate"
+        elif success_rate > 0.6:
+            return "good performance"
+        elif trials > 20:
+            return "trusted (high trials)"
+        else:
+            return "moderate performance"
+    
+    def is_strategy_active(self, strategy: str, context: Dict = None, goal: str = "default") -> bool:
+        """Check if strategy is active (not pruned)."""
+        key = self._get_strategy_key(strategy, context, goal)
+        stats = self._strategy_scores.get(key)
+        
+        if not stats:
+            return True  # New strategies are active
+        
+        return stats.get("active", True)
+    
+    def set_strategy_active(self, strategy: str, active: bool, context: Dict = None, goal: str = "default") -> None:
+        """Mark strategy as active/inactive (for pruning)."""
+        key = self._get_strategy_key(strategy, context, goal)
+        
+        if key not in self._strategy_scores:
+            self._strategy_scores[key] = {
+                "alpha": 1.0,
+                "beta": 1.0,
+            }
+        
+        self._strategy_scores[key]["active"] = active
+    
+    def penalize(self, strategy: str, context: Dict = None, goal: str = "default", strength: float = 0.1) -> None:
+        """Penalize a strategy (increase failure probability)."""
+        key = self._get_strategy_key(strategy, context, goal)
+        stats = self._strategy_scores.get(key)
+        
+        if not stats:
+            return
+        
+        stats["beta"] = stats.get("beta", 1.0) + strength
+    
+    def boost(self, strategy: str, context: Dict = None, goal: str = "default", strength: float = 0.1) -> None:
+        """Boost a strategy (increase success probability)."""
+        key = self._get_strategy_key(strategy, context, goal)
+        stats = self._strategy_scores.get(key)
+        
+        if not stats:
+            return
+        
+        stats["alpha"] = stats.get("alpha", 1.0) + strength
+    
+    def should_prune(self, strategy: str, context: Dict = None, goal: str = "default") -> bool:
+        """Check if strategy should be pruned based on poor performance."""
+        key = self._get_strategy_key(strategy, context, goal)
+        stats = self._strategy_scores.get(key)
+        
+        if not stats:
+            return False
+        
+        trials = stats.get("reward_count", 0)
+        
+        if trials < 15:
+            return False
+        
+        alpha = stats.get("alpha", 1.0)
+        beta = stats.get("beta", 1.0)
+        success_rate = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.5
+        avg_reward = stats.get("total_reward", 0) / max(trials, 1)
+        
+        return success_rate < 0.4 and avg_reward < 0.3
+    
+    def prune_strategies(self, context: Dict = None, goal: str = "default") -> List[str]:
+        """Prune poorly performing strategies."""
+        pruned = []
+        
+        for key in list(self._strategy_scores.keys()):
+            if isinstance(key, tuple) and len(key) >= 3:
+                strat, ctx, g = key[0], key[1], key[2]
+                
+                if ctx == self.get_context_key(context) and g == goal:
+                    if self.should_prune(strat, context, goal):
+                        self.set_strategy_active(strat, False, context, goal)
+                        pruned.append(strat)
+        
+        return pruned
+    
+    def register_strategy(self, strategy: str, context: Dict = None, goal: str = "default", is_new: bool = True) -> None:
+        """Register a new strategy with cold-start penalty."""
+        key = self._get_strategy_key(strategy, context, goal)
+        
+        if key in self._strategy_scores:
+            return
+        
+        if is_new:
+            self._strategy_scores[key] = {
+                "alpha": 0.5,
+                "beta": 1.5,
+                "total_reward": 0.0,
+                "reward_count": 0,
+                "reward_history": [],
+                "active": True,
+                "is_new": True,
+            }
+        else:
+            self._strategy_scores[key] = {
+                "alpha": 1.0,
+                "beta": 1.0,
+                "total_reward": 0.0,
+                "reward_count": 0,
+                "reward_history": [],
+                "active": True,
+            }
+    
+    def get_active_strategies(self, context: Dict = None, goal: str = "default") -> List[str]:
+        """Get list of active strategies."""
+        active = []
+        
+        for key in self._strategy_scores.keys():
+            if isinstance(key, tuple) and len(key) >= 3:
+                strat, ctx, g = key[0], key[1], key[2]
+                
+                if ctx == self.get_context_key(context) and g == goal:
+                    if self.is_strategy_active(strat, context, goal):
+                        active.append(strat)
+        
+        return active
+    
+    def mutate_strategy(self, base_strategy: str, meta: Dict = None) -> Optional[str]:
+        """Generate a behavioral mutation of a strategy based on execution metadata.
+        
+        Uses | suffix to indicate behavior modification (pipeline composition):
+        - |parallel: concurrent execution for latency
+        - |cached: use cache for cost
+        - |refresh: force fresh fetch for freshness
+        """
+        if not meta:
+            return None
+        
+        latency = meta.get("latency_score", 0.5)
+        cost = meta.get("cost_score", 0.5)
+        freshness = meta.get("freshness", 0.5)
+        
+        mutations = []
+        
+        if latency > 0.7:
+            mutations.append(f"{base_strategy}|parallel")
+        
+        if cost > 0.7:
+            mutations.append(f"{base_strategy}|cached")
+        
+        if freshness < 0.3:
+            mutations.append(f"{base_strategy}|refresh")
+        
+        if not mutations:
+            return None
+        
         import random
-        best_strategy = strategies[0] if strategies else "unknown"
-        best_score = -1.0
+        new_strategy = random.choice(mutations)
         
+        if len(new_strategy) > 60:
+            return None
+        
+        return new_strategy
+    
+    def is_duplicate_family(self, strategy: str, context: Dict = None, goal: str = "default") -> bool:
+        """Check if strategy is too similar to existing ones."""
+        base = strategy.split("|")[0]
+        
+        for key in self._strategy_scores.keys():
+            if isinstance(key, tuple) and len(key) >= 3:
+                strat, ctx, g = key
+                if ctx == self.get_context_key(context) and g == goal:
+                    existing_base = strat.split("|")[0]
+                    if existing_base == base:
+                        return True
+        
+        return False
+    
+    def should_accept_mutation(self, new_strategy: str, context: Dict = None, goal: str = "default") -> bool:
+        """Filter mutations - only accept if truly new."""
+        key = self._get_strategy_key(new_strategy, context, goal)
+        
+        if key in self._strategy_scores:
+            return False
+        
+        if self.is_duplicate_family(new_strategy, context, goal):
+            return False
+        
+        return True
+    
+    EVOLUTION_INTERVAL = 50
+    
+    def maybe_evolve(self, context: Dict = None, goal: str = "default") -> Optional[Dict]:
+        """Delayed evolution - only run every N iterations."""
+        if self._iteration_count % self.EVOLUTION_INTERVAL != 0:
+            return None
+        
+        from semantic.replay_engine import ReplayEngine
+        engine = ReplayEngine(self)
+        
+        return engine.evolution_step(context, goal)
+    
+    MAX_STRATEGIES = 20
+    MAX_PER_FAMILY = 5
+    
+    def limit_strategy_space(self, context: Dict = None, goal: str = "default") -> int:
+        """Limit strategy space to prevent explosion. Returns count of disabled."""
+        ctx_key = self.get_context_key(context)
+        
+        strategies_by_family: Dict[str, List[tuple]] = {}
+        
+        for key in self._strategy_scores.keys():
+            if isinstance(key, tuple) and len(key) >= 3:
+                strat, ctx, g = key
+                
+                if ctx == ctx_key and g == goal:
+                    family = strat.split("_")[0]
+                    
+                    if family not in strategies_by_family:
+                        strategies_by_family[family] = []
+                    
+                    alpha = self._strategy_scores[key].get("alpha", 1.0)
+                    beta = self._strategy_scores[key].get("beta", 1.0)
+                    score = alpha / (alpha + beta) if (alpha + beta) > 0 else 0.5
+                    
+                    strategies_by_family[family].append((score, key))
+        
+        disabled = 0
+        
+        for family, scored in strategies_by_family.items():
+            scored.sort(reverse=True)
+            
+            if len(scored) <= self.MAX_PER_FAMILY:
+                continue
+            
+            for _, key in scored[self.MAX_PER_FAMILY:]:
+                self._strategy_scores[key]["active"] = False
+                disabled += 1
+        
+        total_active = sum(
+            1 for k in self._strategy_scores.keys()
+            if isinstance(k, tuple) and self._strategy_scores[k].get("active", True)
+        )
+        
+        if total_active > self.MAX_STRATEGIES:
+            all_strategies = [
+                (k, self._strategy_scores[k].get("alpha", 1.0) / max(self._strategy_scores[k].get("alpha", 1.0) + self._strategy_scores[k].get("beta", 1.0), 0.01), k)
+                for k in self._strategy_scores.keys()
+                if isinstance(k, tuple) and self._strategy_scores[k].get("active", True)
+            ]
+            all_strategies.sort(key=lambda x: x[1], reverse=True)
+            
+            for _, _, key in all_strategies[self.MAX_STRATEGIES:]:
+                self._strategy_scores[key]["active"] = False
+                disabled += 1
+        
+        return disabled
+    
+    def _get_thompson_sample_for_key(self, key: tuple) -> float:
+        """Get TS sample for specific (strategy, context, goal) key."""
+        import random
+        
+        if key not in self._strategy_scores:
+            return random.betavariate(1.0, 1.0)
+        
+        stats = self._strategy_scores[key]
+        alpha = stats.get("alpha", 1.0)
+        beta = stats.get("beta", 1.0)
+        
+        try:
+            return random.betavariate(alpha, beta)
+        except (ValueError, ZeroDivisionError):
+            return 0.5
+        
+        # ε-greedy exploration
+        if random.random() < self.EPSILON:
+            selected = random.choice(strategies)
+            print(f"[ε-GREEDY] Exploring: {selected}")
+            self._last_seen[(ctx_key, selected)] = self._iteration_count
+            return selected
+        
+        # TS scoring for all candidates (context-aware)
+        scores = {}
         for s in strategies:
-            # FORCED RE-EXPLORATION: Check if strategy needs re-check
+            # Get context-aware key
+            strat_key = self._get_strategy_key(s, context)
+            
             if self._should_force_rexplore(s):
-                print(f"[REXPLORE] Forcing re-check of {s}")
+                print(f"[REXPLORE] Re-checking: {s}")
+                self._last_seen[(ctx_key, s)] = self._iteration_count
                 return s
             
-            # Get Thompson sample
-            ts_sample = self._get_thompson_sample(s)
+            # Get Thompson sample for this (strategy, context)
+            ts_sample = self._get_thompson_sample_for_context(s, context)
             
-            # RECENCY BOOST: Give slight boost to recent strategies
-            key = ("default", s)
-            last_seen = self._last_seen.get(key, 0)
+            # Recency boost
+            last_seen = self._last_seen.get((ctx_key, s), 0)
             recency = 1.0 + self.RECENCY_WEIGHT * (1.0 - min(1.0, (self._iteration_count - last_seen) / 50))
             
-            final_score = ts_sample * recency
-            
-            if final_score > best_score:
-                best_score = final_score
-                best_strategy = s
+            scores[s] = ts_sample * recency
         
-        # Track selection for re-exploration tracking
-        self._last_seen[("default", best_strategy)] = self._iteration_count
+        # Select best by score
+        if not scores:
+            return strategies[0] if strategies else "unknown"
+        
+        best_strategy = max(scores, key=scores.get)
+        
+        # Track selection
+        self._last_seen[(ctx_key, best_strategy)] = self._iteration_count
         
         return best_strategy
     
-    def _get_thompson_sample(self, strategy: str) -> float:
-        """Pure Thompson Sampling: sample from Beta distribution"""
+    def _get_thompson_sample_for_context(self, strategy: str, context: Dict[str, Any] = None) -> float:
+        """Get TS sample for specific (strategy, context) pair."""
+        import random
+        
+        key = self._get_strategy_key(strategy, context)
+        
+        if key not in self._strategy_scores:
+            return random.betavariate(1.0, 1.0)
+        
+        stats = self._strategy_scores[key]
+        alpha = stats.get("alpha", 1.0)
+        beta = stats.get("beta", 1.0)
+        
+        try:
+            return random.betavariate(alpha, beta)
+        except (ValueError, ZeroDivisionError):
+            return 0.5
+        """Pure Thompson Sampling: sample from Beta distribution using soft update values"""
         import random
         
         if strategy not in self._strategy_scores:
             # New strategy: uniform prior - will explore naturally
             return random.betavariate(1.0, 1.0)
         
-        weighted_s, weighted_f, total_trials = self._get_weighted_counts(strategy)
+        stats = self._strategy_scores[strategy]
         
-        # Prior that fades with experience
-        prior_scale = 2.0 / (2.0 + total_trials)
-        
-        alpha = weighted_s + prior_scale
-        beta = weighted_f + prior_scale
+        # Use soft update alpha/beta (more accurate than computing from timestamps)
+        alpha = stats.get("alpha", 1.0)
+        beta = stats.get("beta", 1.0)
         
         try:
             return random.betavariate(alpha, beta)
         except (ValueError, ZeroDivisionError):
             return 0.5
     
-    def get_strategy_score(self, strategy: str) -> float:
+    # Context-aware selection
+    def get_context_key(self, context: Dict[str, Any] = None) -> str:
+        """Extract context key for context-aware learning.
+        
+        Now uses multiple buckets for finer context differentiation:
+        - network status (online/offline)
+        - latency conditions (high/medium/low)  
+        - cost conditions (high/medium/low)
+        
+        This enables Contextual Bandit: different strategies for different conditions.
+        """
+        if context is None:
+            context = {}
+        
+        network = context.get("network", "default")
+        
+        latency = context.get("latency", 0.5)
+        if latency > 0.7:
+            latency_bucket = "high"
+        elif latency < 0.3:
+            latency_bucket = "low"
+        else:
+            latency_bucket = "medium"
+        
+        cost = context.get("cost", 0.5)
+        if cost > 0.7:
+            cost_bucket = "high"
+        elif cost < 0.3:
+            cost_bucket = "low"
+        else:
+            cost_bucket = "medium"
+        
+        return f"{network}|{latency_bucket}|{cost_bucket}"
+    
+    def _get_strategy_key(self, strategy: str, context: Dict[str, Any] = None, goal: str = "default") -> tuple:
+        """Get storage key for (strategy, context, goal) triplet."""
+        ctx_key = self.get_context_key(context)
+        return (strategy, ctx_key, goal)
         """Calculate score using weighted Beta distribution with time decay"""
         if strategy not in self._strategy_scores:
             self._strategy_scores[strategy] = {"success_times": [], "fail_times": []}
@@ -525,44 +1018,66 @@ class PlanMemory:
         
         return 1.0 / (total_trials + 1)
     
-    def record_strategy_success(self, strategy: str) -> None:
-        """Record successful execution of strategy (logical clock already incremented in select)"""
-        if strategy not in self._strategy_scores:
-            self._strategy_scores[strategy] = {"success_times": [], "fail_times": [], "total_trials": 0}
-        
-        # Increment total_trials and cache (O(1))
-        self._strategy_scores[strategy]["total_trials"] = \
-            self._strategy_scores[strategy].get("total_trials", 0) + 1
-        self._total_experience_cache += 1
-        
-        # Store CURRENT iteration (clock already ticked in select_strategy)
-        self._strategy_scores[strategy]["success_times"].append(self._iteration_count)
-        
-        # Keep only last MAX_HISTORY_SIZE for decay calculation
-        if len(self._strategy_scores[strategy]["success_times"]) > self.MAX_HISTORY_SIZE:
-            self._strategy_scores[strategy]["success_times"] = \
-                self._strategy_scores[strategy]["success_times"][-self.MAX_HISTORY_SIZE:]
+    def record_strategy_success(self, strategy: str, context: Dict[str, Any] = None) -> None:
+        self.record_strategy_reward(strategy, 1.0, context)
     
-    def record_strategy_failure(self, strategy: str) -> None:
-        """Record failed execution of strategy (logical clock already incremented in select)"""
-        if strategy not in self._strategy_scores:
-            self._strategy_scores[strategy] = {"success_times": [], "fail_times": [], "total_trials": 0}
+    def record_strategy_failure(self, strategy: str, context: Dict[str, Any] = None, goal: str = "default") -> None:
+        self.record_strategy_reward(strategy, 0.0, context, goal)
+    
+    def record_strategy_reward(self, strategy: str, reward: float, context: Dict[str, Any] = None, goal: str = "default", metadata: Dict[str, Any] = None) -> None:
+        """
+        Context + goal-aware soft update.
         
-        # Increment total_trials and cache (O(1))
-        self._strategy_scores[strategy]["total_trials"] = \
-            self._strategy_scores[strategy].get("total_trials", 0) + 1
+        key = (strategy, context, goal)
+        Stores full reward history for explainability.
+        """
+        import time
+        key = self._get_strategy_key(strategy, context, goal)
+        
+        # Ensure strategy exists with reward tracking
+        if key not in self._strategy_scores:
+            self._strategy_scores[key] = {
+                "alpha": 1.0,
+                "beta": 1.0,
+                "total_reward": 0.0,
+                "reward_count": 0,
+                "reward_history": [],
+            }
+        
+        stats = self._strategy_scores[key]
+        
+        # Increment cache
         self._total_experience_cache += 1
         
-        # Store CURRENT iteration (clock already ticked in select_strategy)
-        self._strategy_scores[strategy]["fail_times"].append(self._iteration_count)
+        # Apply decay (forgetting old experiences)
+        current_alpha = stats.get("alpha", 1.0)
+        current_beta = stats.get("beta", 1.0)
+        stats["alpha"] = max(current_alpha * self.DECAY_FACTOR, self.MIN_ALPHA)
+        stats["beta"] = max(current_beta * self.DECAY_FACTOR, self.MIN_ALPHA)
         
-        # Track last seen for forced re-exploration
+        # Soft Bayesian update
+        stats["alpha"] = stats.get("alpha", 1.0) + reward
+        stats["beta"] = stats.get("beta", 1.0) + (1.0 - reward)
+        stats["total_reward"] = stats.get("total_reward", 0.0) + reward
+        stats["reward_count"] = stats.get("reward_count", 0) + 1
+        
+        # Store reward history for explainability
+        if "reward_history" not in stats:
+            stats["reward_history"] = []
+        
+        stats["reward_history"].append({
+            "iteration": self._iteration_count,
+            "reward": reward,
+            "ts": time.time(),
+            "meta": metadata,
+        })
+        
+        # Keep only recent history
+        if len(stats["reward_history"]) > self.MAX_REWARD_HISTORY:
+            stats["reward_history"] = stats["reward_history"][-self.MAX_REWARD_HISTORY:]
+        
+        # Track last seen
         self._last_seen[(strategy, strategy)] = self._iteration_count
-        
-        # Keep only last MAX_HISTORY_SIZE for decay calculation
-        if len(self._strategy_scores[strategy]["fail_times"]) > self.MAX_HISTORY_SIZE:
-            self._strategy_scores[strategy]["fail_times"] = \
-                self._strategy_scores[strategy]["fail_times"][-self.MAX_HISTORY_SIZE:]
     
     # ========================================================================
     # FORCED RE-EXPLORATION (Coverage Guarantee)

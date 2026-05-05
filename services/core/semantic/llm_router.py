@@ -31,20 +31,7 @@ VALID_ROLES: List[Literal["planner", "critic", "replanner", "executor"]] = [
 
 
 def extract_json(text: str) -> Dict[str, Any]:
-    """
-    Extract JSON from LLM response.
-    
-    LLM often returns text with JSON embedded. This extracts it reliably.
-    
-    Args:
-        text: Raw LLM response
-        
-    Returns:
-        Parsed JSON dict
-        
-    Raises:
-        ValueError: If no JSON found
-    """
+    """Extract JSON from LLM response."""
     if not text:
         raise ValueError("Empty response from LLM")
     
@@ -60,32 +47,55 @@ def extract_json(text: str) -> Dict[str, Any]:
     if not match:
         raise ValueError(f"No JSON found in response: {text[:200]}")
     
-    json_str = match.group()
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        logger.error("json_parse_failed", error=str(e), json_snippet=json_str[:100])
-        raise ValueError(f"Invalid JSON: {e}")
+    return json.loads(match.group())
+
+_context_builder = None
+
+
+def _get_context_builder():
+    """Get or create context builder."""
+    global _context_builder
+    if _context_builder is None:
+        try:
+            from semantic.context_builder import get_context_builder
+            _context_builder = get_context_builder()
+        except ImportError:
+            _context_builder = None
+    return _context_builder
 
 
 class LLMRouter:
     """
-    Role-based LLM router for planning loop.
+    Role-based LLM router with MULTI-MODEL support.
     
-    Routes requests to appropriate models based on role:
-    - planner   → deepseek-reasoner (ollama/deepseek-v3.1)
-    - critic    → deepseek-reasoner (ollama/deepseek-v3.1)
-    - replanner → deepseek-reasoner (ollama/deepseek-v3.1)
-    - executor  → deepseek-reasoner (ollama/deepseek-v3.1)
+    Routes requests to different models based on role:
+    - planner   → deepseek-reasoner (structured reasoning)
+    - critic     → deepseek-reasoner (analytical, strict)
+    - replanner  → deepseek-reasoner (creative fixing)
+    - executor   → local-coder (code execution)
     
-    Note: Uses LiteLLM model names (defined in litellm_config.yaml)
+    Using same model for now, but architecture supports multi-model.
     """
     
     ROLE_MODELS = {
-        "planner": "deepseek-reasoner",
-        "critic": "deepseek-reasoner", 
-        "replanner": "deepseek-reasoner",
-        "executor": "deepseek-reasoner",
+        "planner": "deepseek-reasoner",    # Structured planning
+        "critic": "deepseek-reasoner",      # Critical analysis  
+        "replanner": "deepseek-reasoner",   # Creative fixing
+        "executor": "deepseek-reasoner",    # Execution
+    }
+    
+    ROLE_TEMPERATURE = {
+        "planner": 0.2,   # Structured, consistent
+        "critic": 0.0,    # Strict, deterministic
+        "replanner": 0.3, # Creative, flexible
+        "executor": 0.2,  # Balanced
+    }
+    
+    ROLE_MAX_TOKENS = {
+        "planner": 4096,
+        "critic": 2048,
+        "replanner": 4096,
+        "executor": 8192,
     }
     
     ROLE_TEMPERATURE = {
@@ -129,10 +139,25 @@ class LLMRouter:
         
         model = self.ROLE_MODELS[role]
         temperature = self.ROLE_TEMPERATURE[role]
+        max_tokens = self.ROLE_MAX_TOKENS.get(role, 4096)
+        
+        builder = _get_context_builder()
+        if builder and role == "planner":
+            context = builder.build_planner_context(input_data)
+            user_content = builder.format_for_llm(context, prompt)
+            user_content = builder.wrap_with_validation(user_content)
+        elif builder and role == "critic":
+            context = {"raw_input": input_data}
+            user_content = builder.format_for_llm(context, prompt)
+        elif builder and role == "replanner":
+            context = {"raw_input": input_data}
+            user_content = builder.format_for_llm(context, prompt)
+        else:
+            user_content = input_data
         
         messages = [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": input_data}
+            {"role": "user", "content": user_content}
         ]
         
         try:
@@ -141,7 +166,7 @@ class LLMRouter:
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=4096
+                max_tokens=max_tokens
             )
             
             content = result["choices"][0]["message"]["content"]

@@ -706,12 +706,30 @@ class GoalDecomposer:
 """
 
         try:
-            # Прямой LLM вызов вместо agent graph (избегаем SAFETY BREAK)
-            system_msg = SystemMessage(content="Ты эксперт по декомпозиции целей. Отвечай только валидным JSON.")
-            user_msg = HumanMessage(content=decomposition_prompt)
-
-            response = await llm.ainvoke([system_msg, user_msg])
-            result = response.content
+            # Try direct LLM call first (bypasses LiteLLM)
+            from llm.direct_router import call_llm_direct
+            
+            system_msg = "Ты эксперт по декомпозиции целей. Отвечай только валидным JSON."
+            user_msg = decomposition_prompt
+            
+            # Use direct router with fallback
+            llm_result = await call_llm_direct(
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_msg}
+                ],
+                fallback_model="tinyllama",
+                max_tokens=200,
+                timeout=15.0
+            )
+            
+            if llm_result["success"]:
+                result = llm_result["content"]
+                logger.info("decomposition_completed", 
+                          subgoals_count=0,  # Will count after parsing
+                          provider=llm_result.get("provider", "unknown"))
+            else:
+                raise Exception("Direct LLM call failed")
 
             # Парсим JSON ответ
             import json
@@ -728,7 +746,14 @@ class GoalDecomposer:
         except Exception as e:
             logger.error("decomposition_error", error=str(e))
             logger.debug("decomposition_raw_response", response=str(result)[:200] if "result" in locals() else "No response")
-            # Если не удалось декомпозировать - помечаем как atomic
+            
+            # Rule-based fallback: создаём базовые подцели если LLM не сработал
+            subgoals = self._generate_fallback_subgoals(goal)
+            if subgoals:
+                logger.info("decomposition_fallback_used", subgoals_count=len(subgoals))
+                return subgoals
+            
+            # Если даже fallback не помог - помечаем как atomic
             goal.is_atomic = True
             return []
 
@@ -760,6 +785,61 @@ class GoalDecomposer:
             logger.debug("telegram_notification_http_error", error=str(e))
         except Exception as e:
             logger.warning("telegram_notification_failed", error=str(e))
+
+    def _generate_fallback_subgoals(self, goal) -> List[Dict]:
+        """
+        Rule-based fallback: создаёт базовые подцели для любой не-атомарной цели.
+        
+        Это гарантирует что pipeline не сломается даже если LLM недоступен.
+        """
+        base_title = goal.title[:50] if goal.title else "Goal"
+        
+        subgoals = [
+            {
+                "title": f"Исследовать: {base_title}",
+                "description": f"Собрать информацию по теме: {goal.description[:100] if goal.description else base_title}",
+                "goal_type": "exploratory",
+                "is_atomic": False,
+                "domains": goal.domains or ["general"],
+                "completion_criteria": {"condition": "Собрано минимум 3 источника информации"},
+                "success_definition": "Информация собрана и структурирована"
+            },
+            {
+                "title": f"Планирование: {base_title}",
+                "description": "Создать детальный план достижения цели",
+                "goal_type": "achievable",
+                "is_atomic": False,
+                "domains": goal.domains or ["general"],
+                "completion_criteria": {"condition": "План содержит минимум 3 шага"},
+                "success_definition": "План создан и согласован"
+            },
+            {
+                "title": f"Первый шаг: {base_title}",
+                "description": "Выполнить первое конкретное действие",
+                "goal_type": "achievable",
+                "is_atomic": True,
+                "domains": goal.domains or ["general"],
+                "completion_criteria": {"condition": "Первое действие выполнено"},
+                "success_definition": "Действие завершено"
+            }
+        ]
+        
+        # Фильтруем по goal_type
+        if goal.goal_type == "directional":
+            subgoals[0]["title"] = f"Определить направление: {base_title}"
+            subgoals[0]["description"] = "Выбрать конкретную область для движения"
+            
+        elif goal.goal_type == "continuous":
+            subgoals[0]["title"] = f"Настроить практику: {base_title}"
+            subgoals[0]["description"] = "Создать систему регулярной практики"
+            subgoals[2]["title"] = f"Начать практику: {base_title}"
+            
+        elif goal.goal_type == "exploratory":
+            subgoals[1]["goal_type"] = "exploratory"
+            subgoals[2]["is_atomic"] = False
+            subgoals[2]["title"] = f"Документировать открытия: {base_title}"
+        
+        return subgoals
 
 
 # Глобальный экземпляр

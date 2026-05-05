@@ -75,16 +75,17 @@ class GoalSelector:
 
         # Use raw SQL to avoid import issues with GoalDependency
         # Check for unsatisfied dependencies via raw SQL
+        # FIX: Include 'archived' as completed status (goals in archived are done)
         limit_clause = f"LIMIT {limit}" if limit else ""
         stmt = text(f"""
             SELECT g.id FROM goals g
-            WHERE g.status = 'pending'
+            WHERE g.status IN ('pending', 'active')
             AND g.is_atomic = true
             AND (g.progress < 1.0 OR g.progress IS NULL)
             AND NOT EXISTS (
                 SELECT 1 FROM goal_dependencies gd
                 JOIN goals gp ON gp.id = gd.depends_on_goal_id
-                WHERE gd.goal_id = g.id AND gp.status != 'done'
+                WHERE gd.goal_id = g.id AND gp.status NOT IN ('done', 'archived')
             )
             ORDER BY g.created_at ASC
             {limit_clause}

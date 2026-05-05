@@ -102,8 +102,12 @@ class TraceCollector:
         handler = handlers.get(event_name)
         if handler:
             try:
-                # All handlers are async, just await directly
-                await handler(event)
+                import asyncio
+                import inspect
+                if inspect.iscoroutinefunction(handler):
+                    await handler(event)
+                else:
+                    handler(event)
             except Exception as e:
                 print(f"TraceCollector error handling {event_name}: {e}")
 

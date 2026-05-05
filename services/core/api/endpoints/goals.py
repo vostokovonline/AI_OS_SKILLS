@@ -57,7 +57,7 @@ async def execute_goal_endpoint(req: dict):
 @router.get("/list")
 async def get_goals_list(
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=100, description="Items per page"),
+    page_size: int = Query(500, ge=1, le=1000, description="Items per page (max 1000)"),
     status: Optional[str] = Query(None, description="Filter by status"),
     goal_type: Optional[str] = Query(None, description="Filter by type")
 ):
@@ -66,7 +66,7 @@ async def get_goals_list(
     
     Args:
         page: Номер страницы (начиная с 1)
-        page_size: Количество элементов на странице (1-100)
+        page_size: Количество элементов на странице (1-1000)
         status: Фильтр по статусу (опционально)
         goal_type: Фильтр по типу цели (опционально)
     """

@@ -1,8 +1,8 @@
 import uuid
 import asyncio
 from uuid import UUID
-# Use BackgroundScheduler instead of AsyncIOScheduler for thread-safe operation
-from apscheduler.schedulers.background import BackgroundScheduler
+# Use AsyncIOScheduler - lives in same event loop as FastAPI
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from tasks import run_cron_task
 from resource_manager import SystemMonitor
@@ -13,9 +13,12 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-# BackgroundScheduler works without event loop - perfect for threading
-scheduler = BackgroundScheduler()
+# AsyncIOScheduler - all jobs run in the same event loop (no loop conflicts!)
+scheduler = AsyncIOScheduler()
 monitor = SystemMonitor()
+
+# Concurrency limiter - prevents overwhelming the system
+_execution_semaphore = asyncio.Semaphore(15)  # Max 15 concurrent executions
 
 
 # ============================================================================
@@ -123,7 +126,8 @@ def _create_use_cases():
 
     v3.0: Теперь включает Arbitration layer.
     """
-    from infrastructure.uow import create_uow_provider, get_uow
+    from infrastructure.uow import create_uow_provider
+    from application.bulk_engine import BulkTransitionEngine as ResumeBulkEngine
     from application.bulk_transition_engine import bulk_transition_engine
     from application.use_cases import (
         ResumePendingGoalsUseCase,
@@ -145,8 +149,14 @@ def _create_use_cases():
         InMemoryArbitrationLog,
     )
 
-    uow_factory = get_uow
+    uow_factory = create_uow_provider()
     event_bus = get_event_bus()
+
+    # Resume needs bulk_engine with transition_goal method (from bulk_engine.py)
+    resume_bulk_engine = ResumeBulkEngine()
+    
+    # Execute needs bulk_transition_engine with apply_execution_intents method
+    execute_bulk_engine = bulk_transition_engine
 
     # Create arbitration components
     arbitrator = BatchArbitrator(
@@ -157,17 +167,17 @@ def _create_use_cases():
         arbitration_log=InMemoryArbitrationLog(max_size=100),
     )
 
-    capital_allocator = FixedBudgetAllocator(budget=30.0)  # ← FIX C: Increased from 10.0 to 30.0 for higher throughput
+    capital_allocator = FixedBudgetAllocator(budget=100.0)  # Increased from 30 for higher throughput
 
     resume_use_case = ResumePendingGoalsUseCase(
         uow_factory=uow_factory,
-        bulk_engine=bulk_transition_engine,
+        bulk_engine=resume_bulk_engine,
     )
 
     execute_use_case = ExecuteReadyGoalsUseCase(
         uow_factory=uow_factory,
         executor=goal_executor_v2,
-        bulk_engine=bulk_transition_engine,
+        bulk_engine=execute_bulk_engine,
         arbitrator=arbitrator,  # ✅ v3.0: Arbitration layer
         capital_allocator=capital_allocator,  # ✅ v3.0: Budget management
         event_bus=event_bus,
@@ -218,20 +228,23 @@ async def execute_atomic_goals():
     Unhandled exceptions will cause scheduler shutdown and container restart.
     
     Теперь использует Cognitive Arbiter для умного выбора целей.
+    Uses semaphore to limit concurrent executions and prevent saturation.
     """
     from time import time
 
     try:
         start_time = time()
 
-        # Используем Cognitive Arbiter для умного выбора
-        use_cases = _get_use_cases()
-        
-        # Сначала получим scored goals через arbiter
-        arbiter_result = await use_cases["execute"].run(
-            actor="scheduler.atomic_executor",
-            limit=20
-        )
+        # Use semaphore to limit concurrent executions
+        async with _execution_semaphore:
+            # Используем Cognitive Arbiter для умного выбора
+            use_cases = _get_use_cases()
+            
+            # Сначала получим scored goals через arbiter
+            arbiter_result = await use_cases["execute"].run(
+                actor="scheduler.atomic_executor",
+                limit=50  # Increased from 20 for higher throughput
+            )
 
         duration = time() - start_time
 
@@ -306,7 +319,9 @@ async def auto_resume_pending_goals():
     )
     
     logger.info(
-        f"resume_summary: found={result.total_found}, activated={result.activated}, skipped={result.skipped}, failed={result.failed}"
+        f"resume_summary: found={result.total_found}, activated={result.activated}, "
+        f"atomic={result.activated_atomic}, directional={result.activated_directional}, "
+        f"failed={result.failed}"
     )
 
 
@@ -442,6 +457,11 @@ def start_scheduler():
     _setup_event_handlers()
     _setup_execution_event_handlers()  # Register dependency resolution handlers
 
+    # Create wrapped versions of async functions for scheduler
+    # (BackgroundScheduler runs in thread, so we need to run async in new event loop)
+    # No wrapper needed - AsyncIOScheduler runs in same loop as FastAPI
+    # Just use async functions directly
+
     # CRITICAL SETTINGS for all jobs to prevent misfire after container restart
     JOB_CONFIG = {
         'misfire_grace_time': 120,  # Allow 2min delay before skipping
@@ -458,15 +478,12 @@ def start_scheduler():
     )
 
     # Atomic Goals Executor every 90 seconds
-    # ← FIX B2: Increased from 30s to 90s to prevent job overlap
-    # Batch of 20 goals takes ~2.5 min (20 × 8 sec/goal)
-    # 90 sec interval ensures previous batch completes before next run
     scheduler.add_job(
         execute_atomic_goals,
         'interval',
-        seconds=90,  # ← Balanced: allows 20-goal batch to complete
+        seconds=90,
         id='atomic_executor',
-        max_instances=1,  # Prevent overlapping executions
+        max_instances=1,
         **JOB_CONFIG
     )
 
@@ -642,8 +659,10 @@ def start_scheduler():
 
     scheduler.start()
     logger.info("scheduler_started",
+               scheduler_running=scheduler.running,
+               jobs_count=len(scheduler.get_jobs()),
                cognitive_heartbeat="every 10 min",
-               atomic_executor="every 30 seconds",  # ← FIX B: Updated
+               atomic_executor="every 30 seconds",
                auto_resume="every 5 min",
                decomposition="every 10 min",
                execution_recovery="every 1 min",

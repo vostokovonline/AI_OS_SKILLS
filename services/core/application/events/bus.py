@@ -38,7 +38,12 @@ class EventBus:
         logger.info(f"event_subscribers: {type(event).__name__}, count={len(handlers)}")
         for handler in handlers:
             try:
-                await handler(event)
+                import asyncio
+                import inspect
+                if inspect.iscoroutinefunction(handler):
+                    await handler(event)
+                else:
+                    handler(event)
             except Exception as e:
                 logger.error(
                     f"event_handler_error: event_type={type(event).__name__}, error={str(e)}"

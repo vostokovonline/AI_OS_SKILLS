@@ -15,10 +15,46 @@ export default defineConfig({
     port: 3000,
     strictPort: true,
     proxy: {
+      // Proxy all backend API paths
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ''),
+      },
+      '/semantic': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/control': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/goals': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/arbitration': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/llm': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/analytics': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/skills': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/artifacts': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/alerts': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
       },
     },
   },

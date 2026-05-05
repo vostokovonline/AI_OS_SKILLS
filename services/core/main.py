@@ -1,6 +1,6 @@
 import uuid, asyncio, time, os
 from datetime import datetime, timezone
-from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi import FastAPI, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
@@ -124,6 +124,20 @@ app.include_router(analytics_router)
 # LLM Control Center router
 app.include_router(llm_control_router)
 
+# Distributed LLM Queue API (async job system)
+try:
+    from llm_queue_api import router as llm_queue_router
+    app.include_router(llm_queue_router)
+except ImportError:
+    pass
+
+# System Control API
+try:
+    from llm_system_api import router as llm_system_router
+    app.include_router(llm_system_router)
+except ImportError:
+    pass
+
 # Decision Trace router
 app.include_router(decision_trace_router)
 
@@ -162,6 +176,10 @@ app.include_router(model_rotation_router)
 # Autonomy System (NEW)
 from api.endpoints.autonomy import router as autonomy_router
 app.include_router(autonomy_router)
+
+# v1 API (Goals Read - Canonical)
+from api.v1.goals import router as goals_v1_router
+app.include_router(goals_v1_router)
 
 # UoW Provider for dependency injection
 uow_provider = create_uow_provider()
@@ -208,33 +226,17 @@ async def startup():
     configure_dispatcher(celery_app)
     logger.info("✓ GoalDispatcher configured")
     
-    # Start scheduler in background thread (non-blocking)
-    import threading
-    import time
+    # Start scheduler - AsyncIOScheduler runs in same event loop as FastAPI
+    # No thread needed - it integrates with uvicorn's event loop
     from scheduler import start_scheduler
     
-    def start_scheduler_with_logging():
-        try:
-            logger.info("Starting scheduler in background thread...")
-            start_scheduler()
-            logger.info("Scheduler started successfully in background thread")
-        except Exception as e:
-            logger.error(f"Scheduler failed to start: {e}")
+    try:
+        start_scheduler()
+        logger.info("✓ Scheduler started successfully")
+    except Exception as e:
+        logger.error(f"Scheduler failed to start: {e}")
     
-    scheduler_thread = threading.Thread(target=start_scheduler_with_logging, daemon=False)
-    scheduler_thread.start()
-    
-    # Wait a bit for scheduler to initialize
-    time.sleep(2)
-    
-    # Check if scheduler started
-    from scheduler import scheduler as sched
-    if sched.running:
-        logger.info(f"✓ Scheduler running with {len(sched.get_jobs())} jobs")
-    else:
-        logger.warning("⚠ Scheduler not running after 2s - will retry in API calls")
-    
-    # v3.0: Inject arbitration components into API endpoints
+    # Get use cases after scheduler is ready
     from scheduler import _get_use_cases
     use_cases = _get_use_cases()
     
@@ -378,7 +380,8 @@ async def startup():
 
     logger.info("✓ Metrics Engine initialized and subscribed to event bus")
 
-    start_scheduler()
+    # Note: Scheduler is already started in background thread above (line 219)
+    # Do NOT call start_scheduler() again here - it would cause "RuntimeError: cannot schedule new futures after shutdown"
     logger.info("🚀 SYSTEM ONLINE")
 
 @app.post("/chat", response_model=MessageResponse)
@@ -925,12 +928,12 @@ async def run_pipeline_debug():
     from goal_executor_v2 import goal_executor_v2
     from application.bulk_engine import BulkTransitionEngine
     
-    get_uow = create_uow_provider()
+    get_uow_factory = create_uow_provider()
     bulk_engine = BulkTransitionEngine()
     
-    resume_use_case = ResumePendingGoalsUseCase(uow_factory=get_uow, bulk_engine=bulk_engine)
+    resume_use_case = ResumePendingGoalsUseCase(uow_factory=get_uow_factory, bulk_engine=bulk_engine)
     execute_use_case = ExecuteReadyGoalsUseCase(
-        uow_factory=get_uow,
+        uow_factory=get_uow_factory,
         executor=goal_executor_v2,
         bulk_engine=bulk_engine,
         arbitrator=None,
@@ -1145,7 +1148,10 @@ async def get_goal_tree(goal_id: str):
 
 
 @app.get("/goals/list")
-async def get_goals_list():
+async def get_goals_list(
+    limit: int = 500,  # Changed default to 500
+    offset: int = 0
+):
     """Получает список всех целей (для v2 dashboard)"""
     from models import Goal
     from database import AsyncSessionLocal
@@ -1155,6 +1161,8 @@ async def get_goals_list():
         result = await db.execute(
             select(Goal)
             .order_by(Goal.created_at.desc())
+            .limit(limit)  # Now actually uses the parameter
+            .offset(offset)
         )
         goals = result.scalars().all()
 
@@ -1177,7 +1185,9 @@ async def get_goals_list():
         return {
             "status": "ok",
             "goals": goals_list,
-            "total": len(goals_list)
+            "total": len(goals_list),
+            "limit": limit,
+            "offset": offset
         }
 
 
@@ -2163,6 +2173,16 @@ async def get_llm_status():
         "status": "ok",
         "llm_status": status
     }
+
+
+@app.get("/metrics")
+def prometheus_metrics():
+    """Prometheus /metrics endpoint - sync for event loop safety"""
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
 
 
 @app.post("/llm/reset_groq")
