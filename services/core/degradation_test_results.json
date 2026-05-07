@@ -1,0 +1,266 @@
+{
+  "iterations": [
+    {
+      "iteration": 1,
+      "phase": "FIND",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 2,
+      "phase": "FIND",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 3,
+      "phase": "FIND",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 4,
+      "phase": "FIND",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 5,
+      "phase": "FIND",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 6,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 7,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 8,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 9,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 10,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 11,
+      "phase": "DEGRADE",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "explore",
+      "locked": null
+    },
+    {
+      "iteration": 12,
+      "phase": "DEGRADE",
+      "selected": "api_fetch",
+      "success": false,
+      "mode": "explore",
+      "locked": null
+    },
+    {
+      "iteration": 13,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 14,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 15,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 16,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "exploit",
+      "locked": "web_scraping"
+    },
+    {
+      "iteration": 17,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "explore",
+      "locked": null
+    },
+    {
+      "iteration": 18,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "explore",
+      "locked": null
+    },
+    {
+      "iteration": 19,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 20,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 21,
+      "phase": "READAPT",
+      "selected": "web_scraping",
+      "success": false,
+      "mode": "explore",
+      "locked": null
+    },
+    {
+      "iteration": 22,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 23,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "probe",
+      "locked": null
+    },
+    {
+      "iteration": 24,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 25,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 26,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 27,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 28,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 29,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    },
+    {
+      "iteration": 30,
+      "phase": "READAPT",
+      "selected": "cached_data",
+      "success": true,
+      "mode": "exploit",
+      "locked": "cached_data"
+    }
+  ],
+  "phase_stats": {
+    "FIND": {
+      "total": 5,
+      "success": 5
+    },
+    "DEGRADE": {
+      "total": 7,
+      "success": 5
+    },
+    "READAPT": {
+      "total": 18,
+      "success": 13
+    }
+  },
+  "strategy_distribution": {
+    "web_scraping": 20,
+    "api_fetch": 1,
+    "cached_data": 9
+  },
+  "find_locked": true,
+  "degrade_unlocked": true,
+  "readapt_new": false
+}

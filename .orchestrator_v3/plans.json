@@ -1,0 +1,65 @@
+{
+  "plan_20260315_000405": {
+    "goal": "Analyze PDF research paper",
+    "tasks": [
+      {
+        "id": "task_1",
+        "description": "Use pdf_parse capability to achieve: Analyze PDF research paper",
+        "capabilities": [
+          "pdf_parse"
+        ],
+        "status": "pending",
+        "result": null,
+        "error": null
+      },
+      {
+        "id": "task_2",
+        "description": "Use web_search capability to achieve: Analyze PDF research paper",
+        "capabilities": [
+          "web_search"
+        ],
+        "status": "pending",
+        "result": null,
+        "error": null
+      },
+      {
+        "id": "task_3",
+        "description": "Use data_analysis capability to achieve: Analyze PDF research paper",
+        "capabilities": [
+          "data_analysis"
+        ],
+        "status": "pending",
+        "result": null,
+        "error": null
+      }
+    ],
+    "capabilities": [
+      {
+        "capability": "pdf_parse",
+        "confidence": 0.9,
+        "source": "historical/keyword",
+        "priority": 2
+      },
+      {
+        "capability": "web_search",
+        "confidence": 0.9,
+        "source": "historical/keyword",
+        "priority": 2
+      },
+      {
+        "capability": "data_analysis",
+        "confidence": 0.9,
+        "source": "historical/keyword",
+        "priority": 2
+      }
+    ],
+    "required_capabilities": [
+      "web_search",
+      "data_analysis",
+      "pdf_parse"
+    ],
+    "status": "pending",
+    "created_at": "2026-03-15T00:04:05.075903",
+    "completed_at": null
+  }
+}

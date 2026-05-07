@@ -1,0 +1,402 @@
+{
+  "test_goal": "fetch external data from API",
+  "iterations": 30,
+  "scenario": "api_fail_until_10_then_recover",
+  "strategy_distribution": {
+    "api_fetch": 1,
+    "web_scraping": 29
+  },
+  "first_api_after_blacklist": null,
+  "iterations_log": [
+    {
+      "iteration": 1,
+      "selected": "api_fetch",
+      "success": false,
+      "blacklist_status": {},
+      "strategy_score": 0.5,
+      "strategy_stats": {
+        "success": 0,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 1
+    },
+    {
+      "iteration": 2,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.5,
+      "strategy_stats": {
+        "success": 0,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 3,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.6666666666666666,
+      "strategy_stats": {
+        "success": 1,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 4,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.75,
+      "strategy_stats": {
+        "success": 2,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 5,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.8,
+      "strategy_stats": {
+        "success": 3,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 6,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.8333333333333334,
+      "strategy_stats": {
+        "success": 4,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 7,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.8571428571428571,
+      "strategy_stats": {
+        "success": 5,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 8,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.875,
+      "strategy_stats": {
+        "success": 6,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 9,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.8888888888888888,
+      "strategy_stats": {
+        "success": 7,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 10,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9,
+      "strategy_stats": {
+        "success": 8,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 11,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9090909090909091,
+      "strategy_stats": {
+        "success": 9,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 12,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9166666666666666,
+      "strategy_stats": {
+        "success": 10,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 13,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9230769230769231,
+      "strategy_stats": {
+        "success": 11,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 14,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9285714285714286,
+      "strategy_stats": {
+        "success": 12,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 15,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9333333333333333,
+      "strategy_stats": {
+        "success": 13,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 16,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9375,
+      "strategy_stats": {
+        "success": 14,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 17,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9411764705882353,
+      "strategy_stats": {
+        "success": 15,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 18,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9444444444444444,
+      "strategy_stats": {
+        "success": 16,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 19,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9473684210526315,
+      "strategy_stats": {
+        "success": 17,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 20,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.95,
+      "strategy_stats": {
+        "success": 18,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 21,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9523809523809523,
+      "strategy_stats": {
+        "success": 19,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 22,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9545454545454546,
+      "strategy_stats": {
+        "success": 20,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 23,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9565217391304348,
+      "strategy_stats": {
+        "success": 21,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 24,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9583333333333334,
+      "strategy_stats": {
+        "success": 22,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 25,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.96,
+      "strategy_stats": {
+        "success": 23,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 26,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9615384615384616,
+      "strategy_stats": {
+        "success": 24,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 27,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9629629629629629,
+      "strategy_stats": {
+        "success": 25,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 28,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9642857142857143,
+      "strategy_stats": {
+        "success": 26,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 29,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9655172413793104,
+      "strategy_stats": {
+        "success": 27,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 30,
+      "selected": "web_scraping",
+      "success": true,
+      "blacklist_status": {},
+      "strategy_score": 0.9666666666666667,
+      "strategy_stats": {
+        "success": 28,
+        "fail": 0
+      },
+      "was_filtered": false,
+      "duration_ms": 0
+    }
+  ]
+}

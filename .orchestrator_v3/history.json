@@ -1,0 +1,7 @@
+{
+  "analyze pdf research paper": [
+    "pdf_parse",
+    "web_search",
+    "data_analysis"
+  ]
+}

@@ -1,0 +1,494 @@
+{
+  "test_goal": "fetch external data from API",
+  "iterations": 20,
+  "blacklist_threshold": 2,
+  "final_blacklist": [
+    "fetch external data from API:api_fetch"
+  ],
+  "success_count": 18,
+  "fail_count": 2,
+  "strategy_distribution": {
+    "api_fetch": 2,
+    "web_scraping": 18
+  },
+  "iterations_log": [
+    {
+      "iteration": 1,
+      "blacklisted": [],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "api_fetch",
+      "success": false,
+      "error": "rate_limit: 429 Too Many Requests",
+      "category": "rate_limit",
+      "duration_ms": 0
+    },
+    {
+      "iteration": 2,
+      "blacklisted": [],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "api_fetch",
+      "success": false,
+      "error": "rate_limit: 429 Too Many Requests",
+      "category": "rate_limit",
+      "duration_ms": 0
+    },
+    {
+      "iteration": 3,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 4,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 5,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 6,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 7,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 8,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 9,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 10,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 11,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 12,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 13,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 14,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 15,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 16,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 17,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 18,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 19,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    },
+    {
+      "iteration": 20,
+      "blacklisted": [
+        "fetch external data from API:api_fetch"
+      ],
+      "candidates": [
+        "api_fetch",
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "filtered": [
+        "web_scraping",
+        "database_fetch",
+        "cached_data",
+        "bulk_write"
+      ],
+      "selected": "web_scraping",
+      "success": true,
+      "error": null,
+      "category": null,
+      "duration_ms": 0
+    }
+  ]
+}

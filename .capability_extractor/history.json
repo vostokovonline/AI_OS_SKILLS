@@ -1,0 +1,19 @@
+{
+  "parse pdf document and extract text": [
+    "pdf_parse",
+    "document_processing",
+    "parsing",
+    "information_extraction"
+  ],
+  "search web for ai research papers": [
+    "web_access",
+    "web_search"
+  ],
+  "write python code to analyze data": [
+    "coding",
+    "python_programming",
+    "data_processing",
+    "data_analysis",
+    "file_write"
+  ]
+}

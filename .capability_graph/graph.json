@@ -1,0 +1,338 @@
+{
+  "capabilities": {
+    "pdf_parse": {
+      "capability": "pdf_parse",
+      "skills": [
+        "pdf_parser_v1",
+        "pdf_parser_v2",
+        "pdf_parse_skill"
+      ],
+      "performance": {
+        "pdf_parser_v1": {
+          "success_rate": 0.72,
+          "avg_latency": 1200,
+          "confidence": 0.8,
+          "last_updated": "2026-03-14T23:00:47.018531"
+        },
+        "pdf_parser_v2": {
+          "success_rate": 0.91,
+          "avg_latency": 750,
+          "confidence": 0.92,
+          "last_updated": "2026-03-14T23:00:47.020442"
+        },
+        "pdf_parse_skill": {
+          "success_rate": 0.5,
+          "avg_latency": 1000,
+          "confidence": 0.5,
+          "last_updated": "2026-03-15T00:04:05.078874"
+        }
+      },
+      "best_skill": "pdf_parser_v2"
+    },
+    "web_search": {
+      "capability": "web_search",
+      "skills": [
+        "google_search",
+        "web_search_skill"
+      ],
+      "performance": {
+        "google_search": {
+          "success_rate": 0.88,
+          "avg_latency": 2300,
+          "confidence": 0.85,
+          "last_updated": "2026-03-14T23:00:47.020797"
+        },
+        "web_search_skill": {
+          "success_rate": 0.5,
+          "avg_latency": 1000,
+          "confidence": 0.5,
+          "last_updated": "2026-03-15T00:04:05.077903"
+        }
+      },
+      "best_skill": "google_search"
+    },
+    "data_analysis": {
+      "capability": "data_analysis",
+      "skills": [
+        "data_analysis_skill"
+      ],
+      "performance": {
+        "data_analysis_skill": {
+          "success_rate": 0.5,
+          "avg_latency": 1000,
+          "confidence": 0.5,
+          "last_updated": "2026-03-15T00:04:05.078441"
+        }
+      },
+      "best_skill": "data_analysis_skill"
+    },
+    "search": {
+      "capability": "search",
+      "skills": [
+        "web_search"
+      ],
+      "performance": {
+        "web_search": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.162424"
+        }
+      },
+      "best_skill": "web_search"
+    },
+    "extract": {
+      "capability": "extract",
+      "skills": [
+        "web_search"
+      ],
+      "performance": {
+        "web_search": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.163549"
+        }
+      },
+      "best_skill": "web_search"
+    },
+    "summarize": {
+      "capability": "summarize",
+      "skills": [
+        "summarize"
+      ],
+      "performance": {
+        "summarize": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.164050"
+        }
+      },
+      "best_skill": "summarize"
+    },
+    "generate": {
+      "capability": "generate",
+      "skills": [
+        "code_generate"
+      ],
+      "performance": {
+        "code_generate": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.164378"
+        }
+      },
+      "best_skill": "code_generate"
+    },
+    "refactor": {
+      "capability": "refactor",
+      "skills": [
+        "code_refactor"
+      ],
+      "performance": {
+        "code_refactor": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.164732"
+        }
+      },
+      "best_skill": "code_refactor"
+    },
+    "review": {
+      "capability": "review",
+      "skills": [
+        "code_review"
+      ],
+      "performance": {
+        "code_review": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.165052"
+        }
+      },
+      "best_skill": "code_review"
+    },
+    "debug": {
+      "capability": "debug",
+      "skills": [
+        "code_debug"
+      ],
+      "performance": {
+        "code_debug": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.165381"
+        }
+      },
+      "best_skill": "code_debug"
+    },
+    "read": {
+      "capability": "read",
+      "skills": [
+        "file_read"
+      ],
+      "performance": {
+        "file_read": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.165688"
+        }
+      },
+      "best_skill": "file_read"
+    },
+    "write": {
+      "capability": "write",
+      "skills": [
+        "file_write"
+      ],
+      "performance": {
+        "file_write": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.166132"
+        }
+      },
+      "best_skill": "file_write"
+    },
+    "analyze": {
+      "capability": "analyze",
+      "skills": [
+        "analyze_code"
+      ],
+      "performance": {
+        "analyze_code": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.166447"
+        }
+      },
+      "best_skill": "analyze_code"
+    },
+    "profile": {
+      "capability": "profile",
+      "skills": [
+        "analyze_performance"
+      ],
+      "performance": {
+        "analyze_performance": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.166758"
+        }
+      },
+      "best_skill": "analyze_performance"
+    },
+    "benchmark": {
+      "capability": "benchmark",
+      "skills": [
+        "analyze_performance"
+      ],
+      "performance": {
+        "analyze_performance": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.167538"
+        }
+      },
+      "best_skill": "analyze_performance"
+    },
+    "query": {
+      "capability": "query",
+      "skills": [
+        "sql_query"
+      ],
+      "performance": {
+        "sql_query": {
+          "success_rate": 1.0,
+          "avg_latency": 0.0,
+          "confidence": 1.0,
+          "last_updated": "2026-03-15T00:37:46.167938"
+        }
+      },
+      "best_skill": "sql_query"
+    },
+    "document_processing": {
+      "capability": "document_processing",
+      "skills": [
+        "document_processing_skill"
+      ],
+      "performance": {
+        "document_processing_skill": {
+          "success_rate": 0.5,
+          "avg_latency": 1000,
+          "confidence": 0.5,
+          "last_updated": "2026-03-15T00:09:49.826840"
+        }
+      },
+      "best_skill": "document_processing_skill"
+    }
+  },
+  "skill_capabilities": {
+    "pdf_parser_v1": [
+      "pdf_parse"
+    ],
+    "pdf_parser_v2": [
+      "pdf_parse"
+    ],
+    "google_search": [
+      "web_search"
+    ],
+    "web_search_skill": [
+      "web_search"
+    ],
+    "data_analysis_skill": [
+      "data_analysis"
+    ],
+    "pdf_parse_skill": [
+      "pdf_parse"
+    ],
+    "web_search": [
+      "search",
+      "extract"
+    ],
+    "summarize": [
+      "summarize"
+    ],
+    "code_generate": [
+      "generate"
+    ],
+    "code_refactor": [
+      "refactor"
+    ],
+    "code_review": [
+      "review"
+    ],
+    "code_debug": [
+      "debug"
+    ],
+    "file_read": [
+      "read"
+    ],
+    "file_write": [
+      "write"
+    ],
+    "analyze_code": [
+      "analyze"
+    ],
+    "analyze_performance": [
+      "profile",
+      "benchmark"
+    ],
+    "sql_query": [
+      "query"
+    ],
+    "document_processing_skill": [
+      "document_processing"
+    ]
+  }
+}

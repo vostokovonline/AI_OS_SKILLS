@@ -1,0 +1,3 @@
+[submodule "services/core/skills"]
+	path = services/core/skills
+	url = git@github.com:vostokovonline/AI_OS_SKILLS.git

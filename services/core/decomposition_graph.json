@@ -1,0 +1,41 @@
+{
+  "goal:data_fetch": {
+    "type": "goal",
+    "children": [
+      "api_fetch",
+      "cached_data"
+    ],
+    "global": {
+      "s": 1,
+      "f": 1
+    },
+    "stats": {},
+    "last_used": 1775161364.676734,
+    "created_at": 1775161364.6767352
+  },
+  "api_fetch": {
+    "type": "strategy",
+    "children": [],
+    "global": {
+      "s": 1,
+      "f": 1
+    },
+    "stats": {},
+    "last_used": 1775161364.6767433,
+    "created_at": 1775161364.6767435
+  },
+  "cached_data": {
+    "type": "strategy",
+    "children": [],
+    "global": {
+      "s": 1,
+      "f": 1
+    },
+    "stats": {},
+    "last_used": 1775161364.6767502,
+    "created_at": 1775161364.6767504
+  },
+  "_roots": {
+    "data_fetch": "goal:data_fetch"
+  }
+}
