@@ -1,0 +1,19 @@
+skill:
+  author: authority
+  capabilities:
+  - add
+  - subtract
+  - multiply
+  - divide
+  - power
+  contracts:
+    allowed_operations:
+    - compute
+    - read_input
+    - write_output
+    max_execution_time_seconds: 5
+    max_memory_mb: 32
+    max_tokens: 500
+  description: Advanced calculator with multiple operations
+  name: calculator
+  version: 1.0.0

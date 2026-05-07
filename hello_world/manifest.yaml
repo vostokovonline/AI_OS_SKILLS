@@ -1,0 +1,17 @@
+skill:
+  name: hello_world
+  version: "1.0.0"
+  author: authority
+  description: "Simple hello world skill for testing OCCP v1.0"
+  capabilities:
+    - greet
+    - echo
+    - get_timestamp
+  contracts:
+    max_execution_time_seconds: 10
+    max_memory_mb: 64
+    max_tokens: 1000
+    allowed_operations:
+      - compute
+      - read_input
+      - write_output
