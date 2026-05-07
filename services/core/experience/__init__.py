@@ -39,6 +39,13 @@ from experience.skill_stats_service import SkillStatsService
 from experience.skill_stats_cache import SkillStatsCache, skill_stats_cache, get_skill_stats_sync
 from experience.legacy_adapter import LegacyExperienceAdapter, legacy_experience_adapter
 from experience.gaussian_skill_selector import GaussianSkillSelector, GaussianTracker, SkillResult
+from experience.reward_model import compute_reward, normalize_for_gaussian, RewardComponents
+from experience.environment_context import (
+    EnvironmentContext, 
+    inject_rate_limit, 
+    inject_network_issue, 
+    clear_all_conditions
+)
 
 __all__ = [
     "Experience",
@@ -56,4 +63,11 @@ __all__ = [
     "GaussianSkillSelector",
     "GaussianTracker",
     "SkillResult",
+    "compute_reward",
+    "normalize_for_gaussian",
+    "RewardComponents",
+    "EnvironmentContext",
+    "inject_rate_limit",
+    "inject_network_issue",
+    "clear_all_conditions",
 ]

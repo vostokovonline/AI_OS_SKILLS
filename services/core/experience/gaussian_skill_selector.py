@@ -13,7 +13,7 @@ Key properties:
 import math
 import random
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 WINDOW_SIZE = 50  # Environment timescale - how fast things change
@@ -68,27 +68,39 @@ class GaussianTracker:
 
 class GaussianSkillSelector:
     """
-    Production-ready skill selector.
+    Production-ready skill selector with exploration budget.
     
     Selection formula:
-        score = sample_from_N(mean, std)
+        score = sample_from_N(mean, std) + exploration_bonus
     
-    Reward formula:
-        normalized = tanh(raw / scale)
-    
-    Key parameters:
-        WINDOW: how many recent observations to consider
-        SCALE: reward normalization factor
+    Exploration mechanisms:
+        - epsilon_floor: minimum random exploration probability
+        - entropy_bonus: boost under-explored skills
+        - uncertainty_trigger: extra exploration when variance is high
     """
     
     WINDOW = WINDOW_SIZE
     SCALE = REWARD_SCALE
     
-    def __init__(self, window_size: int = WINDOW_SIZE, scale: float = REWARD_SCALE):
+    # Exploration params
+    EPSILON_FLOOR = 0.05  # 5% random exploration always
+    ENTROPY_FLOOR = 0.02  # Small boost for under-explored
+    UNCERTAINTY_THRESHOLD = 0.5  # Std threshold for extra exploration
+    
+    def __init__(
+        self, 
+        window_size: int = WINDOW_SIZE, 
+        scale: float = REWARD_SCALE,
+        temperature: float = 1.0,
+        epsilon_floor: float = 0.05
+    ):
         self.window_size = window_size
         self.scale = scale
+        self.temperature = temperature
+        self.epsilon_floor = epsilon_floor
         self.trackers: Dict[str, GaussianTracker] = {}
         self.total_steps = 0
+        self.exploration_count = 0
     
     def _get_tracker(self, skill_id: str) -> GaussianTracker:
         if skill_id not in self.trackers:
@@ -115,28 +127,69 @@ class GaussianSkillSelector:
         raw = self._raw_reward(result)
         return math.tanh(raw / self.scale)
     
-    def select(self, skill_ids: List[str]) -> str:
+    def select(self, skill_ids: List[str]) -> Tuple[str, str]:
         """
-        Select skill using Thompson Sampling.
+        Select skill using Thompson Sampling with exploration budget.
         
-        Returns the skill with highest sampled value.
-        Exploration happens naturally through variance.
+        Returns:
+            (selected_skill, exploration_mode) where mode is "explore" or "exploit"
         """
         self.total_steps += 1
         
         if not skill_ids:
             raise ValueError("No skills to select from")
         
+        # Exploration check: epsilon-flip for guaranteed minimum exploration
+        if random.random() < self.epsilon_floor:
+            selected = random.choice(skill_ids)
+            self.exploration_count += 1
+            return selected, "explore"
+        
         # Thompson Sampling: sample from each and pick max
         scores = {sid: self._get_tracker(sid).sample() for sid in skill_ids}
+        
+        # Check uncertainty: if top skills have high variance, add exploration bonus
+        top_skills = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:3]
+        if len(top_skills) >= 2:
+            top_std = self._get_tracker(top_skills[0][0]).std
+            second_std = self._get_tracker(top_skills[1][0]).std
+            avg_std = (top_std + second_std) / 2
+            if avg_std > self.UNCERTAINTY_THRESHOLD:
+                # High uncertainty - add random boost to exploration
+                for sid in skill_ids:
+                    scores[sid] += random.uniform(0, self.ENTROPY_FLOOR)
+                self.exploration_count += 1
+        
         selected = max(scores, key=scores.get)
         
-        return selected
+        return selected, "balanced" if self.exploration_count > 0 else "exploit"
     
-    def update(self, skill_id: str, result: SkillResult):
-        """Update tracker with new observation"""
-        r = self.reward(result)
-        self._get_tracker(skill_id).update(r)
+    def update(self, skill_id: str, reward: float):
+        """Update tracker with normalized reward"""
+        self._get_tracker(skill_id).update(reward)
+    
+    def get_selection_probability(self, candidates: List[str], chosen: str) -> float:
+        """
+        Compute P(chosen | candidates) under current Thompson sampling policy.
+        
+        This is used as propensity score for IPS/Doubly Robust evaluation.
+        
+        Approximation: Use softmax over sampled scores.
+        """
+        if not candidates or chosen not in candidates:
+            return 0.0
+        
+        # Get samples
+        scores = {sid: self._get_tracker(sid).sample() for sid in candidates}
+        
+        # Softmax over scores (temperature-scaled)
+        exp_scores = {sid: math.exp(scores[sid] / self.temperature) for sid in candidates}
+        total = sum(exp_scores.values())
+        
+        if total == 0:
+            return 1.0 / len(candidates)  # Uniform if no info
+        
+        return exp_scores.get(chosen, 0) / total
     
     def stats(self) -> Dict:
         """Return selector statistics for monitoring"""

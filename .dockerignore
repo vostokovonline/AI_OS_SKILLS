@@ -1,0 +1,52 @@
+# Python cache
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+*.so
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*.local
+
+# Documentation
+*.md
+!CLAUDE.md
+
+# Test files
+tests/
+pytest.ini
+.pytest_cache/
+.coverage
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+tmp/
+temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories
+postgres_data/
+neo4j_data/
+milvus_data/
+minio_data/
+infra/

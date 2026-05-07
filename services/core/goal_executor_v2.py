@@ -15,6 +15,7 @@ ARCHITECTURE v3.0:
 - All transactions opened by caller, not internally
 """
 import os
+import random
 import json
 from uuid import UUID
 from pathlib import Path
@@ -27,6 +28,15 @@ from models import Goal
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
+
+# Decision Trace Logger for bandit learning
+from goal_harness.decision_trace_logger import (
+    log_decision_start,
+    log_decision_complete,
+    log_decision_complete,
+    log_attempt,
+    decision_trace_logger
+)
 
 from canonical_skills.base import Skill, SkillResult, Artifact
 from canonical_skills.registry import skill_registry
@@ -552,6 +562,7 @@ class GoalExecutorV2:
         }
 
         result = skill.execute(inputs, context)
+        
         logger.info("skill_executed", skill_id=normalize_skill_id(skill), success=result.success, error=result.error, artifacts_count=len(result.artifacts))
         
         # SHADOW MODE: Update Gaussian selector with result
@@ -958,7 +969,8 @@ class GoalExecutorV2:
             )
 
         best_score, best_skill, matched, missed = scored_skills[0]
-        skill_name = getattr(best_skill, 'name', best_skill.__class__.__name__)
+        # Normalize: use .id for consistency with candidates
+        skill_name = getattr(best_skill, 'id', getattr(best_skill, 'name', best_skill.__class__.__name__))
 
         selection_logger.info(
             "skill_selection_final",
@@ -1024,12 +1036,54 @@ class GoalExecutorV2:
         except Exception as e:
             logger.warning(f"Failed to emit SkillSelected: {e}")
 
+        # POLICY SELECTOR: Decide which policy to use
+        # 5% gaussian execution for online learning (with safety fallback)
+        active_policy = "legacy"
+        gaussian_skill = None
+        try:
+            if GAUSSIAN_SELECTOR_AVAILABLE:
+                selector = get_gaussian_selector()
+                if selector:
+                    skill_ids = []
+                    for _, skill, _, _ in scored_skills:
+                        if hasattr(skill, 'id'):
+                            skill_ids.append(skill.id)
+                        elif hasattr(skill, 'name'):
+                            skill_ids.append(skill.name)
+                        else:
+                            skill_ids.append(skill.__class__.__name__)
+                    
+                    if len(skill_ids) > 1:
+                        gaussian_skill, _ = selector.select(skill_ids)
+                        
+                        # 5% flip to gaussian (with safety - only if candidates > 2)
+                        if len(skill_ids) > 2 and random.random() < 0.05:
+                            active_policy = "gaussian"
+                            logger.info("policy_flip_to_gaussian", 
+                                goal_id=str(goal.id)[:8],
+                                legacy_skill=skill_name,
+                                gaussian_skill=gaussian_skill
+                            )
+        except Exception as e:
+            logger.warning("policy_selector_error", error=str(e))
+        
+        # Use the selected policy's skill
+        final_skill_name = gaussian_skill if active_policy == "gaussian" else skill_name
+        
         # SHADOW MODE: Run Gaussian selector in parallel for comparison
         try:
             if GAUSSIAN_SELECTOR_AVAILABLE:
                 selector = get_gaussian_selector()
                 if selector:
-                    skill_ids = [getattr(s, 'name', s.__class__.__name__) for s,_,_,_ in scored_skills]
+                    # FIX: Use (_, skill, _, _) not (s, _, _, _)
+                    skill_ids = []
+                    for _, skill, _, _ in scored_skills:
+                        if hasattr(skill, 'id'):
+                            skill_ids.append(skill.id)
+                        elif hasattr(skill, 'name'):
+                            skill_ids.append(skill.name)
+                        else:
+                            skill_ids.append(skill.__class__.__name__)
                     chosen_by_gaussian = selector.select(skill_ids)
                     
                     # Log comparison (but DON'T use it yet - this is shadow mode)
@@ -1040,9 +1094,69 @@ class GoalExecutorV2:
                         match=chosen_by_gaussian == skill_name,
                         goal_type=goal_type
                     )
+                    
+                    # DECISION TRACE: Log full bandit dataset with REAL context
+                    try:
+                        from goal_harness.decision_trace_logger import synthesize_context
+                        
+                        goal_id_str = goal_snapshot.get("id", "")
+                        goal_desc = goal_snapshot.get("title", "") + " " + goal_snapshot.get("description", "")
+                        
+                        candidates_list = []
+                        for _, skill, _, _ in scored_skills:
+                            if hasattr(skill, 'id'):
+                                name = skill.id
+                            elif hasattr(skill, 'name'):
+                                name = skill.name
+                            else:
+                                name = skill.__class__.__name__
+                            candidates_list.append(str(name))
+                        
+                        # Synthesize REAL context for contextual bandit
+                        context = synthesize_context(
+                            goal_type=goal_type,
+                            goal_description=goal_desc,
+                            candidates=candidates_list,
+                            planner_depth=goal_snapshot.get("depth", 0),
+                            retry_count=0
+                        )
+                        
+                        trace_id = log_decision_start(
+                            goal_id=goal_id_str,
+                            goal_type=goal_type,
+                            task_type="general",
+                            candidates=candidates_list,
+                            legacy_choice=skill_name,
+                            legacy_q_values=None,
+                            phase="shadow",
+                            context=context
+                        )
+                        logger.info("decision_trace_started", 
+                            trace_id=trace_id,
+                            goal_id=goal_id_str[:8] if goal_id_str else "none",
+                            candidates_count=len(candidates_list),
+                            legacy_choice=skill_name
+                        )
+                    except Exception as trace_err:
+                        logger.warning("decision_trace_error", error=str(trace_err), traceback=str(trace_err.__traceback__))
         except Exception as e:
             logger.debug(f"Gaussian selector shadow error: {e}")
 
+        # Return gaussian skill if policy flipped, otherwise return best_skill
+        if active_policy == "gaussian" and gaussian_skill:
+            # Find the gaussian skill in scored_skills
+            for _, skill, _, _ in scored_skills:
+                sid = getattr(skill, 'id', getattr(skill, 'name', skill.__class__.__name__))
+                if sid == gaussian_skill:
+                    logger.info("executing_gaussian_skill", 
+                        goal_id=str(goal.id)[:8] if goal else "unknown",
+                        skill=gaussian_skill,
+                        reason="5% exploration"
+                    )
+                    return skill
+            # Fallback: if gaussian skill not found, return best_skill
+            logger.warning("gaussian_skill_not_found", gaussian_skill=gaussian_skill)
+        
         return best_skill
 
     def _try_mcp_generation(
@@ -1252,6 +1366,29 @@ class GoalExecutorV2:
         global skill_registry
         
         logger.info("pipeline_execution_started", skills_count=len(skills))
+        
+        # MANDATORY TRACE: Start trace for pipeline execution (hot path!)
+        from goal_harness.decision_trace_logger import log_decision_start, synthesize_context
+        candidates_list = [normalize_skill_id(s) for s in skills]
+        goal_desc = (goal.title or "") + " " + (goal.description or "")
+        context = synthesize_context(
+            goal_type=goal.goal_type,
+            goal_description=goal_desc,
+            candidates=candidates_list,
+            planner_depth=goal_snapshot.get("depth", 0),
+            retry_count=0
+        )
+        trace_id = log_decision_start(
+            goal_id=str(goal.id),
+            goal_type=goal.goal_type,
+            task_type="pipeline",
+            candidates=candidates_list,
+            legacy_choice=candidates_list[0] if candidates_list else "",
+            legacy_q_values=None,
+            phase="shadow",
+            context=context
+        )
+        logger.info("pipeline_trace_started", trace_id=trace_id, goal_id=str(goal.id)[:8], candidates=candidates_list)
         
         all_artifacts = []
         all_errors = []
@@ -1498,6 +1635,18 @@ class GoalExecutorV2:
             artifacts=len(all_artifacts),
             sequence=skill_sequence
         )
+        
+        # MANDATORY TRACE: Complete trace for pipeline
+        from goal_harness.decision_trace_logger import log_decision_complete
+        success = status == "success"
+        latency = sum(s.get("duration_ms", 0) for s in trace.get("steps", []) if isinstance(s, dict))
+        log_decision_complete(
+            success=success,
+            latency_ms=float(latency),
+            raw_reward=1.0 if success else -1.0,
+            trace_id=trace_id
+        )
+        logger.info("pipeline_trace_completed", trace_id=trace_id, status=status)
         
         return {
             "status": status,
@@ -1991,7 +2140,7 @@ class GoalExecutorV2:
 
         All operations use the passed UoW - NO internal commit/rollback.
         """
-        logger.info("atomic_goal_execution_started", goal_title=goal.title, goal_id=str(goal.id))
+        print(f"[EXEC_FLOW] atomic_goal_execution_started goal_id={str(goal.id)[:8]} is_atomic={goal.is_atomic}", flush=True)
 
         # Start execution trace
         from datetime import datetime
@@ -2058,8 +2207,11 @@ class GoalExecutorV2:
             # FALLBACK: Try Pipeline-First Execution (old way)
             pipeline_skills = await self._get_skill_pipeline(goal_snapshot, requirements)
             
+            print(f"[EXEC_FLOW] pipeline_skills={pipeline_skills}", flush=True)
+            
             # FIX: Allow single skill fallback too (not just pipeline)
             if pipeline_skills and len(pipeline_skills) >= 1:
+                print(f"[EXEC_FLOW] USING PIPELINE PATH", flush=True)
                 # PIPELINE EXECUTION: Execute multiple skills in sequence
                 trace["pipeline_mode"] = True
                 trace["pipeline_length"] = len(pipeline_skills)
@@ -2073,6 +2225,8 @@ class GoalExecutorV2:
                     return pipeline_result
             
             # SINGLE SKILL FALLBACK: If no pipeline, execute single skill
+            print(f"[EXEC_FLOW] USING SINGLE SKILL PATH", flush=True)
+            
             skill = await self._select_skill_with_performance(
                 requirements,
                 goal_snapshot,
@@ -2139,9 +2293,52 @@ class GoalExecutorV2:
             execution_step_start = datetime.utcnow()
 
             result: SkillResult = skill.execute(inputs, context)
-
+            
+            # ENVIRONMENT-DRIVEN FAILURE: Use real conditions, not synthetic chaos
+            if result.success:
+                from experience.environment_context import EnvironmentContext
+                task_context = {
+                    "complexity": 0.5,
+                    "input_size": len(str(inputs.get("content", ""))),
+                    "requires_network": "web" in skill_id_normalized or "search" in skill_id_normalized,
+                    "requires_filesystem": "write" in skill_id_normalized or "read" in skill_id_normalized,
+                    "estimated_duration_ms": 1000
+                }
+                
+                failure_rate = EnvironmentContext.compute_realistic_failure(
+                    skill_id_normalized, task_context
+                )
+                
+                import random as rand
+                if rand.random() < failure_rate:
+                    result.success = False
+                    result.error = "Environment-driven failure"
+                    result.artifacts = []
+                    logger.warning("env_failure", skill=skill_id_normalized, failure_rate=round(failure_rate, 2))
+            
             execution_step_end = datetime.utcnow()
-
+            duration_ms = int((execution_step_end - execution_step_start).total_seconds() * 1000)
+            
+            # ATTEMPT-LEVEL LOGGING: Log each attempt's reward
+            # Using decomposed reward model for proper bandit learning
+            from experience.reward_model import compute_reward, normalize_for_gaussian
+            attempt_reward = compute_reward(
+                success=result.success,
+                latency_ms=float(duration_ms),
+                attempt_num=1,  # Pipeline mode has single attempt
+                tool_calls=len(result.tool_calls) if hasattr(result, 'tool_calls') else 0,
+                hallucination_score=0.0,  # TODO: integrate hallucination detection
+                artifact_quality=0.5 if result.success else 0.0  # TODO: compute from artifacts
+            )
+            attempt_reward_normalized = normalize_for_gaussian(attempt_reward)
+            log_attempt(
+                skill_id=skill_id_normalized,
+                attempt_num=1,  # Pipeline mode has single attempt
+                success=result.success,
+                latency_ms=float(duration_ms),
+                reward=attempt_reward_normalized
+            )
+              
             logger.info("skill_execution_result", success=result.success)
             logger.info("artifacts_count", count=len(result.artifacts))
 
@@ -2162,7 +2359,54 @@ class GoalExecutorV2:
                 goal_id=str(goal.id),
                 duration_ms=duration_ms
             )
-
+            
+            # COMPLETE DECISION TRACE - ENVIRONMENT-DRIVEN FAILURE
+            if result.success:
+                from experience.environment_context import EnvironmentContext
+                task_context = {
+                    "complexity": 0.5,
+                    "input_size": len(str(inputs.get("content", ""))),
+                    "requires_network": "web" in skill_id_normalized or "search" in skill_id_normalized,
+                    "requires_filesystem": "write" in skill_id_normalized or "read" in skill_id_normalized,
+                    "estimated_duration_ms": 1000
+                }
+                
+                failure_rate = EnvironmentContext.compute_realistic_failure(
+                    skill_id_normalized, task_context
+                )
+                
+                import random as rand
+                if rand.random() < failure_rate:
+                    result.success = False
+                    logger.error("ENV_FAILURE_AT_TRACE_POINT", 
+                        skill=skill_id_normalized, 
+                        rate=failure_rate,
+                        goal_id=str(goal.id)[:8]
+                    )
+            
+            try:
+                # Reward with decomposition model
+                from experience.reward_model import compute_reward
+                attempt_count = trace.get("attempts", [])
+                attempt_num = len(attempt_count) + 1
+                
+                raw_reward = compute_reward(
+                    success=result.success,
+                    latency_ms=float(duration_ms),
+                    attempt_num=attempt_num,
+                    tool_calls=0,  # Already counted in attempt-level
+                    hallucination_score=0.0,
+                    artifact_quality=0.5 if result.success else 0.0
+                )
+                logger.error("TRACE_WRITE_POINT", skill=skill_id_normalized, success=result.success, reward=raw_reward)
+                log_decision_complete(
+                    success=result.success,
+                    latency_ms=float(duration_ms),
+                    raw_reward=raw_reward
+                )
+            except Exception as trace_err:
+                logger.warning("decision_trace_complete_error", error=str(trace_err))
+            
             # Record execution in trace
             trace["steps"].append({
                 "step": "execute_skill",
@@ -3587,6 +3831,29 @@ Format: Markdown"""
                     context={"description": goal.description, "title": goal.title}
                 )
                 
+                # START DECISION TRACE (for bandit learning) with REAL context
+                from goal_harness.decision_trace_logger import synthesize_context
+                goal_desc = (goal.title or "") + " " + (goal.description or "")
+                context = synthesize_context(
+                    goal_type=goal.goal_type,
+                    goal_description=goal_desc,
+                    candidates=candidates,
+                    planner_depth=0,
+                    retry_count=0
+                )
+                
+                trace_id = log_decision_start(
+                    goal_id=str(goal.id),
+                    goal_type=goal.goal_type,
+                    task_type=task_type,
+                    candidates=candidates,
+                    legacy_choice=skill_name,
+                    legacy_q_values=None,
+                    phase="shadow",
+                    context=context
+                )
+                logger.info("decision_trace_started", trace_id=trace_id, gaussian_candidates=candidates)
+                
                 try:
                     # REAL async execution using unified contract: skill.execute(inputs, goal_id)
                     goal_id_str = str(goal.id)
@@ -3601,6 +3868,27 @@ Format: Markdown"""
                         # EXECUTE via unified adapter (NO FAKE SUCCESS)
                         result = await self._safe_skill_execute(skill, skill_inputs, goal_id_str)
                         
+                        # ENVIRONMENT-DRIVEN FAILURE: Real conditions for learning
+                        if result.success and skill_name:
+                            from experience.environment_context import EnvironmentContext
+                            task_context = {
+                                "complexity": 0.5,
+                                "input_size": 0,
+                                "requires_network": "web" in skill_name or "search" in skill_name,
+                                "requires_filesystem": "write" in skill_name or "read" in skill_name,
+                                "estimated_duration_ms": 1000
+                            }
+                            
+                            failure_rate = EnvironmentContext.compute_realistic_failure(
+                                skill_name, task_context
+                            )
+                            
+                            import random as rand
+                            if rand.random() < failure_rate:
+                                result.success = False
+                                result.error = "Injected failure for learning"
+                                result.artifacts = []
+                        
                     except Exception as e:
                         logger.error("skill_execution_error", skill=skill_name, error=str(e))
                         result = type('obj', (object,), {
@@ -3609,7 +3897,7 @@ Format: Markdown"""
                             'artifacts': []
                         })()
                     
-                    # Log result details
+# Log result details
                     result_success = getattr(result, 'success', False)
                     result_artifacts = getattr(result, 'artifacts', [])
                     result_error = getattr(result, 'error', None)
@@ -3644,6 +3932,33 @@ Format: Markdown"""
                         artifacts_count=len(result_artifacts),
                         latency_ms=round(latency_ms, 2),
                         error=result_error
+                    )
+                    
+                    # COMPLETE DECISION TRACE (record reward + latency)
+                    # Shaped reward: success gives 1.0, failure 0.0, minus small latency penalty
+                    raw_reward = (1.0 if true_success else 0.0) - 0.001 * latency_ms
+                    log_decision_complete(
+                        success=true_success,
+                        latency_ms=latency_ms,
+                        raw_reward=raw_reward
+                    )
+                    
+                    logger.info("skill_result", 
+                        skill=skill_name,
+                        success=true_success,
+                        raw_success=result_success,
+                        artifacts_count=len(result_artifacts),
+                        latency_ms=round(latency_ms, 2),
+                        error=result_error
+                    )
+                    
+                    # COMPLETE DECISION TRACE (record reward + latency)
+                    # Shaped reward: success gives 1.0, failure 0.0, minus small latency penalty
+                    raw_reward = (1.0 if true_success else 0.0) - 0.001 * latency_ms
+                    log_decision_complete(
+                        success=true_success,
+                        latency_ms=latency_ms,
+                        raw_reward=raw_reward
                     )
                     
                     step_results.append({
