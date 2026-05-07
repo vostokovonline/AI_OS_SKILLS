@@ -1,0 +1,14 @@
+{
+  "ResearchPythonFrameworks": {
+    "description": "Skill for researching the latest Python frameworks.",
+    "example": "research_python_frameworks()"
+  },
+  "TestSyntheticGoal": {
+    "description": "Tests a synthetic goal by executing API tests.",
+    "example": "test_synthetic_goal()"
+  },
+  "TestAnalyticsV3": {
+    "description": "Skill to test analytics recording.",
+    "example": "test_analytics_v3(some_data)"
+  }
+}
